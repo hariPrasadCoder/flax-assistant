@@ -301,14 +301,15 @@ export default function ChatApp() {
     loadHistoryOrGreet()
   }, [userId, backendUrl]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load nudge history when history tab is activated
+  // Load nudge history every time history tab is activated
   useEffect(() => {
-    if (activeTab !== 'history' || historyLoaded || !backendUrl || !userId) return
-    fetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=20`)
+    if (activeTab !== 'history' || !backendUrl || !userId) return
+    setHistoryLoaded(false)
+    fetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=30`)
       .then(r => r.json())
-      .then(data => { setNudgeHistory(data); setHistoryLoaded(true) })
-      .catch(() => setHistoryLoaded(true))
-  }, [activeTab, historyLoaded, backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
+      .then(data => { setNudgeHistory(Array.isArray(data) ? data : []); setHistoryLoaded(true) })
+      .catch(() => { setNudgeHistory([]); setHistoryLoaded(true) })
+  }, [activeTab, backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load team members for assignment UI
   useEffect(() => {
@@ -776,29 +777,34 @@ export default function ChatApp() {
               initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}
             >
+              {/* Nudge history section */}
               <div style={{
                 fontSize: 10, fontWeight: 700, color: '#9B97CC', letterSpacing: '0.08em',
-                textTransform: 'uppercase', marginBottom: 10,
+                textTransform: 'uppercase', marginBottom: 8,
                 fontFamily: 'IBM Plex Mono, monospace',
               }}>
                 Nudge history
               </div>
-              {nudgeHistory.length === 0 ? (
-                <div style={{ textAlign: 'center', color: '#9B97CC', marginTop: 40 }}>
-                  <div style={{ fontSize: 28, marginBottom: 8 }}>✦</div>
-                  <div style={{ fontSize: 13 }}>
-                    {historyLoaded ? 'No nudges yet' : 'Loading...'}
-                  </div>
+              {!historyLoaded ? (
+                <div style={{ textAlign: 'center', color: '#C3BFF7', marginTop: 16, marginBottom: 16, fontSize: 12 }}>
+                  Loading...
+                </div>
+              ) : nudgeHistory.length === 0 ? (
+                <div style={{
+                  textAlign: 'center', color: '#C3BFF7', marginBottom: 16,
+                  background: 'white', borderRadius: 12, padding: '16px',
+                  border: '1px solid rgba(90,83,225,0.08)', fontSize: 12,
+                }}>
+                  No nudges yet — Flaxie will check in once you have tasks
                 </div>
               ) : (
                 nudgeHistory.map(n => (
                   <div key={n.id} style={{
                     background: 'white', borderRadius: 12, padding: '10px 12px',
                     border: '1px solid rgba(90,83,225,0.1)',
-                    marginBottom: 6, position: 'relative',
+                    marginBottom: 6,
                   }}>
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                      {/* Flaxie mini icon */}
                       <div style={{
                         width: 18, height: 18, borderRadius: '50%', flexShrink: 0,
                         background: 'linear-gradient(135deg, #4A42D8, #6B63E8)',
@@ -845,6 +851,38 @@ export default function ChatApp() {
                     </div>
                   </div>
                 ))
+              )}
+
+              {/* Chat log section */}
+              {messages.length > 0 && (
+                <>
+                  <div style={{
+                    fontSize: 10, fontWeight: 700, color: '#9B97CC', letterSpacing: '0.08em',
+                    textTransform: 'uppercase', margin: '14px 0 8px',
+                    fontFamily: 'IBM Plex Mono, monospace',
+                  }}>
+                    Chat log
+                  </div>
+                  {messages.slice(-20).map(m => (
+                    <div key={m.id} style={{
+                      background: 'white', borderRadius: 10, padding: '8px 11px',
+                      border: '1px solid rgba(90,83,225,0.08)', marginBottom: 4,
+                      display: 'flex', gap: 8, alignItems: 'flex-start',
+                    }}>
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, flexShrink: 0, marginTop: 2,
+                        color: m.role === 'assistant' ? '#5A53E1' : '#9B97CC',
+                        textTransform: 'uppercase', letterSpacing: '0.05em',
+                        fontFamily: 'IBM Plex Mono, monospace',
+                      }}>
+                        {m.role === 'assistant' ? 'Flaxie' : 'You'}
+                      </span>
+                      <span style={{ fontSize: 12, color: '#1a1730', lineHeight: 1.45, flex: 1, minWidth: 0 }}>
+                        {m.content.length > 120 ? m.content.slice(0, 120) + '…' : m.content}
+                      </span>
+                    </div>
+                  ))}
+                </>
               )}
             </motion.div>
           )}
