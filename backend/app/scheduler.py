@@ -109,6 +109,7 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
             recent_nudges=recent_nudges,
             user_name=user_name,
             owned_tasks=owned_tasks,
+            user_id=user_id,
         )
 
         mascot_state = result.get("mascot_state", "idle")

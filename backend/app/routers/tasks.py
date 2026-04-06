@@ -166,3 +166,14 @@ async def assign_task(task_id: str, data: AssignRequest, db: AsyncSession = Depe
     task.updated_at = datetime.utcnow()
     await db.commit()
     return {"id": task.id, "assignee_id": task.assignee_id, "owner_id": task.owner_id}
+
+
+@router.delete("/{task_id}")
+async def delete_task(task_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await db.delete(task)
+    await db.commit()
+    return {"ok": True}

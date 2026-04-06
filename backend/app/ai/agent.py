@@ -40,6 +40,91 @@ class AgentState(TypedDict):
     next_check_minutes: int
 
 
+# ── Task read/write tools (built per-user via closure) ───────────────────────
+
+def build_task_tools(user_id: str, backend_url: str = "http://localhost:8747"):
+    """
+    Create get_tasks / write_task tools with user_id baked in.
+    These execute IMMEDIATELY via the local API — not deferred like notification tools.
+    """
+    import httpx
+
+    @tool
+    def get_tasks() -> str:
+        """
+        Read the current task list for this user. Returns fresh data from the database.
+        Use this to verify what tasks exist and get their exact IDs before writing.
+        Task IDs in your context may be stale — call this when you need certainty.
+        """
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                r = client.get(f"{backend_url}/api/tasks", params={"user_id": user_id})
+                tasks = r.json()
+                if not tasks:
+                    return "No tasks found."
+                lines = ["Current tasks:"]
+                for t in tasks:
+                    dl = f", due: {t['deadline']}" if t.get("deadline") else ""
+                    lines.append(f"  [{t['id']}] '{t['title']}' | {t['status']}{dl}")
+                return "\n".join(lines)
+        except Exception as e:
+            return f"Error reading tasks: {e}"
+
+    @tool
+    def write_task(
+        action: str,
+        task_id: Optional[str] = None,
+        title: Optional[str] = None,
+        status: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> str:
+        """
+        Create, update, or delete a task. Executes immediately.
+
+        action='create' — creates a new task. Requires title.
+        action='update' — updates an existing task. Requires task_id.
+                          Provide any of: status ('open'|'in_progress'|'done'), title, description.
+        action='delete' — removes a task by marking it done. Requires task_id.
+
+        Task IDs are in brackets in your context: [abc-123].
+        Example: write_task(action='update', task_id='abc-123', status='done')
+        """
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                if action == "create":
+                    if not title:
+                        return "Error: title is required for create"
+                    r = client.post(f"{backend_url}/api/tasks", json={
+                        "title": title,
+                        "user_id": user_id,
+                        "description": description,
+                        "status": status or "open",
+                    })
+                    data = r.json()
+                    return f"Created task '{data.get('title')}' [{data.get('id')}]"
+                elif action in ("update", "delete"):
+                    if not task_id:
+                        return "Error: task_id is required"
+                    body: dict = {}
+                    if action == "delete":
+                        body["status"] = "done"
+                    else:
+                        if status:
+                            body["status"] = status
+                        if title:
+                            body["title"] = title
+                        if description is not None:
+                            body["description"] = description
+                    r = client.patch(f"{backend_url}/api/tasks/{task_id}", json=body)
+                    return f"Task [{task_id}] updated: {r.json()}"
+                else:
+                    return f"Unknown action '{action}'. Use: create | update | delete"
+        except Exception as e:
+            return f"Error: {e}"
+
+    return get_tasks, write_task
+
+
 # ── Tools (what Flaxie can DO) ────────────────────────────────────────────────
 
 @tool
@@ -177,6 +262,13 @@ You have tools. Use them when they're the right call:
 - ask_checkin: when a task hasn't moved in a suspicious amount of time
 - celebrate: when something good happened
 - suggest_breakdown: when a vague big task has been sitting untouched
+- get_tasks: read fresh task data from the database (use when you need up-to-date IDs/status)
+- write_task: create, update, or delete tasks — executes IMMEDIATELY
+  - action='create': make a new task (requires title)
+  - action='update': change status/title/description (requires task_id)
+  - action='delete': remove a task by marking it done (requires task_id)
+  Task IDs are shown in [brackets] in your context. Use write_task freely — mark things done,
+  clean up stale tasks, create follow-ups.
 - set_mascot_state: ALWAYS call this — it controls the icon + loop timing
 - be_silent: when there's nothing worth saying (still call set_mascot_state)
 
@@ -426,11 +518,66 @@ def should_continue(state: AgentState) -> str:
 
 # ── Build graph ───────────────────────────────────────────────────────────────
 
-def build_agent_graph() -> Any:
+def build_agent_graph(extra_tools: Optional[List] = None) -> Any:
+    """Build a compiled agent graph. Pass extra_tools to extend the default set."""
+    all_tools = (extra_tools or []) + TOOLS
+    tools_by_name = {t.name: t for t in all_tools}
+
+    def _think(state: AgentState) -> AgentState:
+        if not settings.gemini_api_key:
+            return {"messages": state["messages"]}
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=settings.gemini_api_key,
+            temperature=0.7,
+            max_tokens=1024,
+        ).bind_tools(all_tools)
+        try:
+            response = llm.invoke(state["messages"])
+            return {"messages": [response]}
+        except Exception as e:
+            print(f"[agent] think error: {e}")
+            from langchain_core.messages import AIMessage
+            return {"messages": [AIMessage(content="")]}
+
+    def _act(state: AgentState) -> AgentState:
+        last_msg = state["messages"][-1]
+        if not hasattr(last_msg, "tool_calls") or not last_msg.tool_calls:
+            return state
+        actions_taken = list(state.get("actions_taken", []))
+        mascot_state = state.get("mascot_state", "idle")
+        next_check_minutes = state.get("next_check_minutes", 30)
+        tool_messages = []
+        for call in last_msg.tool_calls:
+            tool_fn = tools_by_name.get(call["name"])
+            if not tool_fn:
+                continue
+            result = tool_fn.invoke(call["args"])
+            tool_messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+            try:
+                parsed = json.loads(result)
+                tool_name = parsed.get("tool") or call["name"]
+                if tool_name == "set_mascot_state":
+                    mascot_state = parsed.get("state", "idle")
+                    next_check_minutes = parsed.get("next_check_minutes", 30)
+                elif tool_name == "be_silent":
+                    next_check_minutes = parsed.get("next_check_minutes", 30)
+                elif tool_name in ("send_notification", "ask_checkin", "celebrate", "suggest_breakdown"):
+                    actions_taken.append(parsed)
+                # get_tasks / write_task execute immediately — no deferred action needed
+            except Exception:
+                pass
+        return {
+            "messages": tool_messages,
+            "actions_taken": actions_taken,
+            "mascot_state": mascot_state,
+            "next_check_minutes": next_check_minutes,
+        }
+
     graph = StateGraph(AgentState)
     graph.add_node("observe", observe_node)
-    graph.add_node("think", think_node)
-    graph.add_node("act", act_node)
+    graph.add_node("think", _think)
+    graph.add_node("act", _act)
 
     graph.set_entry_point("observe")
     graph.add_edge("observe", "think")
@@ -438,15 +585,6 @@ def build_agent_graph() -> Any:
     graph.add_edge("act", END)
 
     return graph.compile()
-
-
-_agent_graph = None
-
-def get_agent_graph():
-    global _agent_graph
-    if _agent_graph is None:
-        _agent_graph = build_agent_graph()
-    return _agent_graph
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -458,12 +596,14 @@ async def run_agent(
     recent_nudges: List[dict],
     user_name: Optional[str] = None,
     owned_tasks: Optional[List[dict]] = None,
+    user_id: Optional[str] = None,
 ) -> dict:
     """
     Run Flaxie's autonomous agent cycle.
     Returns: { actions, mascot_state, next_check_minutes }
     """
-    graph = get_agent_graph()
+    get_tasks_tool, write_task_tool = build_task_tools(user_id or "local")
+    graph = build_agent_graph(extra_tools=[get_tasks_tool, write_task_tool])
 
     initial_state: AgentState = {
         "messages": [],

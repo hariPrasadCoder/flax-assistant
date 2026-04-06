@@ -234,24 +234,49 @@ export default function ChatApp() {
       .catch(() => {})
   }, [backendUrl, userId]) // eslint-disable-line
 
-  // Auto-send nudge context from notification button clicks
+  // Pick up nudge context whenever the chat window gains focus
+  // (notification button stores context in localStorage then opens chat)
+  const isLoadingRef = useRef(isLoading)
+  useEffect(() => { isLoadingRef.current = isLoading }, [isLoading])
+
   useEffect(() => {
-    const ctx = localStorage.getItem('flaxie_nudge_context')
-    if (!ctx || !backendUrl || !userId || isLoading) return
-    localStorage.removeItem('flaxie_nudge_context')
-    const send = async () => {
-      addMessage({ id: `nudge_ctx_${Date.now()}`, role: 'user', content: ctx, timestamp: new Date() })
+    if (!backendUrl || !userId) return
+
+    async function handleNudgeContext() {
+      const raw = localStorage.getItem('flaxie_nudge_context')
+      if (!raw || isLoadingRef.current) return
+      localStorage.removeItem('flaxie_nudge_context')
+
+      let userText = raw
+      let systemHint = ''
+      try {
+        const ctx = JSON.parse(raw)
+        userText = ctx.taskTitle ? `${ctx.action} (re: "${ctx.taskTitle}")` : ctx.action
+        systemHint = ctx.nudgeMessage || ''
+      } catch { /* raw string fallback */ }
+
+      setActiveTab('chat')
+      addMessage({ id: `n_${Date.now()}`, role: 'user', content: userText, timestamp: new Date() })
       setLoading(true)
       try {
         const res = await fetch(`${backendUrl}/api/chat`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: ctx, user_id: userId, user_name: userName, history: [] }),
+          body: JSON.stringify({
+            message: userText,
+            user_id: userId, user_name: userName,
+            history: useChatStore.getState().messages.slice(-12).map(m => ({ role: m.role, content: m.content })),
+            nudge_context: systemHint,
+          }),
         })
         const data = await res.json()
-        addMessage({ id: `nudge_reply_${Date.now()}`, role: 'assistant', content: data.reply, timestamp: new Date() })
+        addMessage({ id: `nr_${Date.now()}`, role: 'assistant', content: data.reply, timestamp: new Date() })
       } catch {} finally { setLoading(false) }
     }
-    setTimeout(send, 1200) // after greeting appears
+
+    window.addEventListener('focus', handleNudgeContext)
+    // Also check immediately — chat may already be focused when context is set
+    handleNudgeContext()
+    return () => window.removeEventListener('focus', handleNudgeContext)
   }, [backendUrl, userId]) // eslint-disable-line
 
   // Auto-scroll
@@ -266,6 +291,7 @@ export default function ChatApp() {
     const userMsg: Message = { id: `u_${Date.now()}`, role: 'user', content: text, timestamp: new Date() }
     addMessage(userMsg)
     setInput('')
+    if (inputRef.current) inputRef.current.style.height = '22px'
     setLoading(true)
 
     try {
@@ -307,6 +333,15 @@ export default function ChatApp() {
       })
       setActiveTab('chat')
     } catch { updateTaskStatus(taskId, 'open') }
+  }
+
+  async function archiveDoneTasks() {
+    const done = tasks.filter(t => t.status === 'done')
+    await Promise.all(done.map(t =>
+      fetch(`${backendUrl}/api/tasks/${t.id}`, { method: 'DELETE' }).catch(() => {})
+    ))
+    const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+    setTasks(await tr.json())
   }
 
   async function quickAddTask(title: string) {
@@ -400,6 +435,24 @@ export default function ChatApp() {
                 : 'All caught up ✓'}
           </div>
         </div>
+        {/* New chat */}
+        <button
+          onClick={() => {
+            useChatStore.getState().clearMessages()
+            greetingShown.current = false
+          }}
+          title="New chat"
+          style={{
+            width: 26, height: 26, borderRadius: 8, border: 'none',
+            background: 'rgba(90,83,225,0.07)', cursor: 'pointer',
+            color: '#9B97CC', fontSize: 13,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            WebkitAppRegion: 'no-drag' as never,
+            transition: 'background 0.15s',
+          }}
+        >
+          ↺
+        </button>
         <button
           onClick={() => window.flaxie?.closeChat()}
           style={{
@@ -548,7 +601,14 @@ export default function ChatApp() {
                     )}
                     {doneTasks.length > 0 && (
                       <div>
-                        <SectionLabel color="#9B97CC">Done · {doneTasks.length}</SectionLabel>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <SectionLabel color="#9B97CC" noMargin>Done · {doneTasks.length}</SectionLabel>
+                          <button onClick={archiveDoneTasks} style={{
+                            fontSize: 10, padding: '2px 8px', borderRadius: 6, border: 'none',
+                            background: 'rgba(0,0,0,0.05)', color: '#9B97CC', cursor: 'pointer',
+                            fontFamily: 'inherit', fontWeight: 500,
+                          }}>Archive all</button>
+                        </div>
                         {doneTasks.slice(0, 5).map(t => <TaskChip key={t.id} task={t} currentUserId={userId} />)}
                       </div>
                     )}
@@ -587,7 +647,14 @@ export default function ChatApp() {
                     )}
                     {doneTasks.length > 0 && (
                       <div>
-                        <SectionLabel color="#9B97CC">Done · {doneTasks.length}</SectionLabel>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                          <SectionLabel color="#9B97CC" noMargin>Done · {doneTasks.length}</SectionLabel>
+                          <button onClick={archiveDoneTasks} style={{
+                            fontSize: 10, padding: '2px 8px', borderRadius: 6, border: 'none',
+                            background: 'rgba(0,0,0,0.05)', color: '#9B97CC', cursor: 'pointer',
+                            fontFamily: 'inherit', fontWeight: 500,
+                          }}>Archive all</button>
+                        </div>
                         {doneTasks.slice(0, 5).map(t => <TaskChip key={t.id} task={t} currentUserId={userId} />)}
                       </div>
                     )}
@@ -612,7 +679,11 @@ export default function ChatApp() {
             <textarea
               ref={inputRef}
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={e => {
+                setInput(e.target.value)
+                e.target.style.height = 'auto'
+                e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+              }}
               onKeyDown={handleKeyDown}
               placeholder="Tell Flaxie what you're working on..."
               disabled={isLoading}
@@ -621,7 +692,8 @@ export default function ChatApp() {
                 flex: 1, background: 'none', border: 'none', outline: 'none',
                 resize: 'none', fontSize: 13.5, lineHeight: 1.45,
                 color: '#1a1730', fontFamily: 'inherit',
-                maxHeight: 80, overflowY: 'auto',
+                height: 22, minHeight: 22, maxHeight: 120, overflowY: 'auto',
+                transition: 'height 0.1s ease',
               }}
             />
             <button
@@ -918,11 +990,11 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
   )
 }
 
-function SectionLabel({ children, color }: { children: React.ReactNode; color: string }) {
+function SectionLabel({ children, color, noMargin }: { children: React.ReactNode; color: string; noMargin?: boolean }) {
   return (
     <div style={{
       fontSize: 10, fontWeight: 700, color, letterSpacing: '0.08em',
-      textTransform: 'uppercase', marginBottom: 6,
+      textTransform: 'uppercase', marginBottom: noMargin ? 0 : 6,
       fontFamily: 'IBM Plex Mono, monospace',
     }}>
       {children}

@@ -63,18 +63,28 @@ export default function NotifBanner() {
   async function handleAction(action: string) {
     if (!data || responding) return
     setResponding(true)
-    try {
-      const res = await fetch(`${data.backendUrl}/api/nudges/${data.nudgeId}/respond`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ response: action }),
-      })
-      const result = await res.json()
-      if (result.open_chat) {
-        if (result.chat_context) localStorage.setItem('flaxie_nudge_context', result.chat_context)
-        ;(window as any).flaxie.openChat()
-      }
-    } catch { /* best effort */ }
+
+    const isSnooze = /snooze|remind me|later|\b1h\b|\b2h\b|\b30m\b/i.test(action)
+
+    // Store context before opening chat so ChatApp can pick it up on focus
+    if (!isSnooze) {
+      localStorage.setItem('flaxie_nudge_context', JSON.stringify({
+        action,
+        nudgeMessage: data.message,
+        taskTitle: data.taskTitle || null,
+      }))
+    }
+
+    // Fire-and-forget — backend handles side effects (mark done, ping owner, etc.)
+    fetch(`${data.backendUrl}/api/nudges/${data.nudgeId}/respond`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response: action }),
+    }).catch(() => {})
+
+    if (!isSnooze) {
+      ;(window as any).flaxie.openChat()
+    }
     dismiss()
   }
 
