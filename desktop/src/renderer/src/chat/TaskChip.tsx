@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import { useState } from 'react'
 
 export interface Task {
   id: string
@@ -9,6 +10,11 @@ export interface Task {
   assignee_id?: string
   owner_id?: string
   nudge_count: number
+  priority?: number
+  is_blocked?: boolean
+  blocked_reason?: string
+  is_recurring?: boolean
+  recurrence_days?: number
 }
 
 function formatDeadline(deadline?: string): { label: string; urgent: boolean; overdue: boolean } {
@@ -30,6 +36,14 @@ function formatDeadline(deadline?: string): { label: string; urgent: boolean; ov
   }
 }
 
+const PRIORITY_CONFIG: Record<number, { dot: string; label: string | null }> = {
+  5: { dot: '#FF4757', label: 'Critical' },
+  4: { dot: '#E67E22', label: null },
+  3: { dot: '', label: null },
+  2: { dot: '#9B97CC', label: null },
+  1: { dot: '', label: null },
+}
+
 interface Props {
   task: Task
   onDone?: (id: string) => void
@@ -39,167 +53,372 @@ interface Props {
   onAssign?: (taskId: string, assigneeId: string) => void
   assigningTaskId?: string | null
   setAssigningTaskId?: (id: string | null) => void
+  onUpdate?: (id: string, patch: object) => void
+  backendUrl?: string
 }
 
-export default function TaskChip({ task, onDone, compact, teamMembers, currentUserId, onAssign, assigningTaskId, setAssigningTaskId }: Props) {
+export default function TaskChip({
+  task, onDone, compact, teamMembers, currentUserId,
+  onAssign, assigningTaskId, setAssigningTaskId, onUpdate, backendUrl,
+}: Props) {
   const isDone = task.status === 'done'
   const isInProgress = task.status === 'in_progress'
   const dl = formatDeadline(task.deadline)
+  const [editing, setEditing] = useState(false)
+  const [editValue, setEditValue] = useState(task.title)
+  const [hovered, setHovered] = useState(false)
+  const [showDatePicker, setShowDatePicker] = useState(false)
+
+  const priority = task.priority ?? 3
+  const priorityCfg = PRIORITY_CONFIG[priority] || PRIORITY_CONFIG[3]
+
+  async function saveEdit() {
+    const trimmed = editValue.trim()
+    if (!trimmed || trimmed === task.title) return
+    if (onUpdate) onUpdate(task.id, { title: trimmed })
+    else if (backendUrl) {
+      await fetch(`${backendUrl}/api/tasks/${task.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      }).catch(() => {})
+    }
+  }
+
+  async function toggleBlocked() {
+    const newVal = !task.is_blocked
+    if (onUpdate) onUpdate(task.id, { is_blocked: newVal })
+    else if (backendUrl) {
+      await fetch(`${backendUrl}/api/tasks/${task.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_blocked: newVal }),
+      }).catch(() => {})
+    }
+  }
+
+  async function saveDeadline(dateStr: string) {
+    setShowDatePicker(false)
+    if (!dateStr) return
+    // Convert local date string to ISO
+    const iso = new Date(dateStr + 'T00:00:00').toISOString()
+    if (onUpdate) onUpdate(task.id, { deadline: iso })
+    else if (backendUrl) {
+      await fetch(`${backendUrl}/api/tasks/${task.id}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deadline: iso }),
+      }).catch(() => {})
+    }
+  }
 
   return (
-    <div style={{ position: 'relative' }}>
-    <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: compact ? '7px 10px' : '10px 12px',
-        background: isDone
-          ? 'rgba(46, 213, 115, 0.06)'
-          : dl.overdue
-            ? 'rgba(255, 71, 87, 0.06)'
-            : dl.urgent
-              ? 'rgba(255, 159, 67, 0.06)'
-              : 'white',
-        borderRadius: 12,
-        border: `1px solid ${
-          isDone ? 'rgba(46,213,115,0.2)' :
-          dl.overdue ? 'rgba(255,71,87,0.2)' :
-          dl.urgent ? 'rgba(255,159,67,0.2)' :
-          'rgba(90, 83, 225, 0.1)'
-        }`,
-        marginBottom: 6,
-      }}
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
     >
-      {/* Checkbox / status */}
-      {!isDone && onDone ? (
-        <button
-          onClick={() => onDone(task.id)}
-          title="Mark done"
-          style={{
-            width: 18, height: 18, borderRadius: 5,
-            border: `1.5px solid ${dl.overdue ? '#FF4757' : dl.urgent ? '#FF9F43' : '#C3BFF7'}`,
-            background: 'white', cursor: 'pointer',
+      <motion.div
+        initial={{ opacity: 0, y: 4 }}
+        animate={{ opacity: 1, y: 0 }}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: compact ? '7px 10px' : '10px 12px',
+          background: isDone
+            ? 'rgba(46, 213, 115, 0.06)'
+            : task.is_blocked
+              ? 'rgba(255,71,87,0.05)'
+              : dl.overdue
+                ? 'rgba(255, 71, 87, 0.06)'
+                : dl.urgent
+                  ? 'rgba(255, 159, 67, 0.06)'
+                  : 'white',
+          borderRadius: 12,
+          border: `1px solid ${
+            isDone ? 'rgba(46,213,115,0.2)' :
+            task.is_blocked ? 'rgba(255,71,87,0.25)' :
+            dl.overdue ? 'rgba(255,71,87,0.2)' :
+            dl.urgent ? 'rgba(255,159,67,0.2)' :
+            'rgba(90, 83, 225, 0.1)'
+          }`,
+          marginBottom: 6,
+        }}
+      >
+        {/* Checkbox / status */}
+        {!isDone && onDone ? (
+          <button
+            onClick={() => onDone(task.id)}
+            title="Mark done"
+            style={{
+              width: 18, height: 18, borderRadius: 5,
+              border: `1.5px solid ${dl.overdue ? '#FF4757' : dl.urgent ? '#FF9F43' : '#C3BFF7'}`,
+              background: 'white', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexShrink: 0, transition: 'all 0.15s',
+            }}
+          />
+        ) : (
+          <div style={{
+            width: 18, height: 18, borderRadius: 5, flexShrink: 0,
+            background: isDone ? '#2ED573' : isInProgress ? '#FF9F43' : 'rgba(90,83,225,0.15)',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            flexShrink: 0, transition: 'all 0.15s',
-          }}
-        />
-      ) : (
-        <div style={{
-          width: 18, height: 18, borderRadius: 5, flexShrink: 0,
-          background: isDone ? '#2ED573' : isInProgress ? '#FF9F43' : 'rgba(90,83,225,0.15)',
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-          {isDone && <span style={{ fontSize: 10, color: 'white' }}>✓</span>}
-          {isInProgress && <span style={{ fontSize: 8, color: 'white' }}>▶</span>}
-        </div>
-      )}
+          }}>
+            {isDone && <span style={{ fontSize: 10, color: 'white' }}>✓</span>}
+            {isInProgress && <span style={{ fontSize: 8, color: 'white' }}>▶</span>}
+          </div>
+        )}
 
-      {/* Title */}
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{
-          fontSize: 13,
-          fontWeight: 500,
-          color: isDone ? '#9B97CC' : '#1a1730',
-          textDecoration: isDone ? 'line-through' : 'none',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          whiteSpace: 'nowrap',
-        }}>
-          {task.title}
-        </div>
-        {!compact && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 1, flexWrap: 'wrap' }}>
-            {task.assignee && (
-              <span style={{ fontSize: 10, color: '#9B97CC' }}>@{task.assignee}</span>
+        {/* Title + meta */}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            {/* Priority dot */}
+            {priorityCfg.dot && (
+              <div style={{
+                width: 6, height: 6, borderRadius: '50%',
+                background: priorityCfg.dot, flexShrink: 0,
+              }} />
             )}
-            {task.assignee_id && currentUserId && task.assignee_id !== currentUserId && task.owner_id === currentUserId && (
-              <span style={{
-                fontSize: 10, fontWeight: 600, color: '#5A53E1',
-                background: 'rgba(90,83,225,0.08)', borderRadius: 6, padding: '1px 5px',
+
+            {/* Recurring icon */}
+            {task.is_recurring && (
+              <span style={{ fontSize: 11, color: '#9B97CC', flexShrink: 0 }}>↻</span>
+            )}
+
+            {/* Title — editable */}
+            {editing ? (
+              <input
+                autoFocus
+                value={editValue}
+                onChange={e => setEditValue(e.target.value)}
+                onBlur={() => { saveEdit(); setEditing(false) }}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') { saveEdit(); setEditing(false) }
+                  if (e.key === 'Escape') { setEditValue(task.title); setEditing(false) }
+                }}
+                style={{
+                  fontSize: 13, border: 'none',
+                  outline: '1.5px solid rgba(90,83,225,0.3)',
+                  borderRadius: 6, padding: '2px 6px',
+                  background: 'white', width: '100%', fontFamily: 'inherit',
+                  color: '#1a1730',
+                }}
+              />
+            ) : (
+              <div style={{
+                fontSize: 13,
+                fontWeight: 500,
+                color: isDone ? '#9B97CC' : '#1a1730',
+                textDecoration: isDone ? 'line-through' : 'none',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
               }}>
-                → {task.assignee || task.assignee_id}
-              </span>
+                {task.title}
+              </div>
             )}
-            {task.owner_id && currentUserId && task.owner_id !== currentUserId && task.assignee_id === currentUserId && (
-              <span style={{ fontSize: 10, color: '#9B97CC' }}>
-                from {teamMembers?.find(m => m.user_id === task.owner_id)?.name || task.owner_id}
+
+            {/* Priority label (critical only) */}
+            {priorityCfg.label && (
+              <span style={{
+                fontSize: 9, fontWeight: 700, color: '#FF4757',
+                background: 'rgba(255,71,87,0.1)', borderRadius: 4,
+                padding: '1px 5px', flexShrink: 0, letterSpacing: '0.04em',
+              }}>
+                {priorityCfg.label}
               </span>
             )}
           </div>
-        )}
-        {/* Assign dropdown */}
-        {assigningTaskId === task.id && teamMembers && teamMembers.length > 0 && setAssigningTaskId && onAssign && (
-          <div style={{
-            position: 'absolute', zIndex: 100,
-            background: 'white', borderRadius: 10,
-            border: '1.5px solid rgba(90,83,225,0.15)',
-            boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-            marginTop: 4, minWidth: 140, overflow: 'hidden',
-          }}>
-            {teamMembers.map(m => (
+
+          {/* Blocked reason subtitle */}
+          {task.is_blocked && task.blocked_reason && (
+            <div style={{ fontSize: 11, color: '#9B97CC', marginTop: 2 }}>
+              {task.blocked_reason}
+            </div>
+          )}
+
+          {!compact && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 1, flexWrap: 'wrap' }}>
+              {task.assignee && (
+                <span style={{ fontSize: 10, color: '#9B97CC' }}>@{task.assignee}</span>
+              )}
+              {task.assignee_id && currentUserId && task.assignee_id !== currentUserId && task.owner_id === currentUserId && (
+                <span style={{
+                  fontSize: 10, fontWeight: 600, color: '#5A53E1',
+                  background: 'rgba(90,83,225,0.08)', borderRadius: 6, padding: '1px 5px',
+                }}>
+                  → {task.assignee || task.assignee_id}
+                </span>
+              )}
+              {task.owner_id && currentUserId && task.owner_id !== currentUserId && task.assignee_id === currentUserId && (
+                <span style={{ fontSize: 10, color: '#9B97CC' }}>
+                  from {teamMembers?.find(m => m.user_id === task.owner_id)?.name || task.owner_id}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Assign dropdown */}
+          {assigningTaskId === task.id && teamMembers && teamMembers.length > 0 && setAssigningTaskId && onAssign && (
+            <div style={{
+              position: 'absolute', zIndex: 100,
+              background: 'white', borderRadius: 10,
+              border: '1.5px solid rgba(90,83,225,0.15)',
+              boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+              marginTop: 4, minWidth: 140, overflow: 'hidden',
+            }}>
+              {teamMembers.map(m => (
+                <button
+                  key={m.user_id}
+                  onClick={() => { onAssign(task.id, m.user_id); setAssigningTaskId(null) }}
+                  style={{
+                    display: 'block', width: '100%', padding: '7px 12px',
+                    border: 'none', background: 'none', textAlign: 'left',
+                    fontSize: 12, color: '#1a1730', cursor: 'pointer',
+                    fontFamily: 'inherit',
+                  }}
+                  onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(90,83,225,0.06)' }}
+                  onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+                >
+                  {m.name}
+                </button>
+              ))}
               <button
-                key={m.user_id}
-                onClick={() => { onAssign(task.id, m.user_id); setAssigningTaskId(null) }}
+                onClick={() => setAssigningTaskId(null)}
                 style={{
-                  display: 'block', width: '100%', padding: '7px 12px',
-                  border: 'none', background: 'none', textAlign: 'left',
-                  fontSize: 12, color: '#1a1730', cursor: 'pointer',
+                  display: 'block', width: '100%', padding: '5px 12px',
+                  border: 'none', borderTop: '1px solid rgba(90,83,225,0.08)',
+                  background: 'none', textAlign: 'left',
+                  fontSize: 11, color: '#9B97CC', cursor: 'pointer',
                   fontFamily: 'inherit',
                 }}
-                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(90,83,225,0.06)' }}
-                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
               >
-                {m.name}
+                Cancel
               </button>
-            ))}
-            <button
-              onClick={() => setAssigningTaskId(null)}
-              style={{
-                display: 'block', width: '100%', padding: '5px 12px',
-                border: 'none', borderTop: '1px solid rgba(90,83,225,0.08)',
-                background: 'none', textAlign: 'left',
-                fontSize: 11, color: '#9B97CC', cursor: 'pointer',
-                fontFamily: 'inherit',
-              }}
-            >
-              Cancel
-            </button>
-          </div>
+            </div>
+          )}
+        </div>
+
+        {/* Blocked badge */}
+        {task.is_blocked && (
+          <span style={{
+            fontSize: 10, fontWeight: 600, color: '#FF4757',
+            background: 'rgba(255,71,87,0.1)', borderRadius: 6,
+            padding: '2px 6px', whiteSpace: 'nowrap', flexShrink: 0,
+          }}>
+            Blocked
+          </span>
         )}
-      </div>
 
-      {/* Deadline pill */}
-      {dl.label && (
-        <span style={{
-          fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap',
-          padding: '2px 7px', borderRadius: 20,
-          background: dl.overdue ? 'rgba(255,71,87,0.1)' : dl.urgent ? 'rgba(255,159,67,0.1)' : 'rgba(90,83,225,0.08)',
-          color: dl.overdue ? '#FF4757' : dl.urgent ? '#E67E22' : '#5A53E1',
-        }}>
-          {dl.label}
-        </span>
-      )}
-
-      {/* Assign button (only for unassigned own tasks when team members exist) */}
-      {!isDone && teamMembers && teamMembers.length > 0 && currentUserId &&
-       task.owner_id === currentUserId && task.assignee_id === currentUserId &&
-       setAssigningTaskId && (
-        <button
-          onClick={() => setAssigningTaskId(assigningTaskId === task.id ? null : task.id)}
-          style={{
-            padding: '2px 7px', borderRadius: 20, border: 'none',
-            background: 'rgba(90,83,225,0.08)', color: '#5A53E1',
-            fontSize: 10, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
-            fontFamily: 'inherit',
+        {/* Deadline pill */}
+        {dl.label && (
+          <span style={{
+            fontSize: 10, fontWeight: 600, whiteSpace: 'nowrap',
+            padding: '2px 7px', borderRadius: 20,
+            background: dl.overdue ? 'rgba(255,71,87,0.1)' : dl.urgent ? 'rgba(255,159,67,0.1)' : 'rgba(90,83,225,0.08)',
+            color: dl.overdue ? '#FF4757' : dl.urgent ? '#E67E22' : '#5A53E1',
+            cursor: 'pointer', flexShrink: 0,
           }}
-        >
-          Assign
-        </button>
+            onClick={() => setShowDatePicker(v => !v)}
+            title="Change deadline"
+          >
+            {dl.label}
+          </span>
+        )}
+
+        {/* Calendar icon for adding/changing deadline */}
+        {!isDone && !dl.label && (
+          <button
+            onClick={() => setShowDatePicker(v => !v)}
+            title="Set deadline"
+            style={{
+              border: 'none', background: 'none', cursor: 'pointer',
+              color: '#C3BFF7', fontSize: 12, padding: '1px 3px',
+              opacity: hovered ? 1 : 0, transition: 'opacity 0.15s', flexShrink: 0,
+            }}
+          >
+            📅
+          </button>
+        )}
+
+        {/* Edit button (pencil, shown on hover) */}
+        {!isDone && !editing && (
+          <button
+            onClick={() => { setEditing(true); setEditValue(task.title) }}
+            title="Edit title"
+            style={{
+              border: 'none', background: 'none', cursor: 'pointer',
+              color: '#9B97CC', fontSize: 11, padding: '1px 3px',
+              opacity: hovered ? 1 : 0, transition: 'opacity 0.15s', flexShrink: 0,
+            }}
+          >
+            ✎
+          </button>
+        )}
+
+        {/* Block toggle button */}
+        {!isDone && (
+          <button
+            onClick={toggleBlocked}
+            title={task.is_blocked ? 'Unblock' : 'Mark blocked'}
+            style={{
+              border: 'none', background: 'none', cursor: 'pointer',
+              fontSize: 11, padding: '1px 3px', flexShrink: 0,
+              opacity: hovered || task.is_blocked ? 1 : 0,
+              transition: 'opacity 0.15s',
+              color: task.is_blocked ? '#FF4757' : '#9B97CC',
+            }}
+          >
+            ⛔
+          </button>
+        )}
+
+        {/* Assign button (only for unassigned own tasks when team members exist) */}
+        {!isDone && teamMembers && teamMembers.length > 0 && currentUserId &&
+         task.owner_id === currentUserId && task.assignee_id === currentUserId &&
+         setAssigningTaskId && (
+          <button
+            onClick={() => setAssigningTaskId(assigningTaskId === task.id ? null : task.id)}
+            style={{
+              padding: '2px 7px', borderRadius: 20, border: 'none',
+              background: 'rgba(90,83,225,0.08)', color: '#5A53E1',
+              fontSize: 10, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+              fontFamily: 'inherit',
+            }}
+          >
+            Assign
+          </button>
+        )}
+      </motion.div>
+
+      {/* Inline date picker */}
+      {showDatePicker && (
+        <div style={{
+          position: 'absolute', right: 0, zIndex: 200,
+          background: 'white', borderRadius: 10,
+          border: '1.5px solid rgba(90,83,225,0.2)',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.1)',
+          padding: '8px 10px', marginTop: 2,
+          display: 'flex', alignItems: 'center', gap: 8,
+        }}>
+          <input
+            type="date"
+            autoFocus
+            defaultValue={task.deadline ? task.deadline.slice(0, 10) : ''}
+            onChange={e => saveDeadline(e.target.value)}
+            onBlur={() => setShowDatePicker(false)}
+            onKeyDown={e => { if (e.key === 'Escape') setShowDatePicker(false) }}
+            style={{
+              border: 'none', outline: 'none', fontSize: 12,
+              color: '#1a1730', fontFamily: 'inherit', background: 'none',
+            }}
+          />
+          <button
+            onClick={() => setShowDatePicker(false)}
+            style={{ border: 'none', background: 'none', color: '#9B97CC', cursor: 'pointer', fontSize: 12 }}
+          >
+            ✕
+          </button>
+        </div>
       )}
-    </motion.div>
     </div>
   )
 }

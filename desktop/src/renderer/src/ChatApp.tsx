@@ -108,16 +108,51 @@ function AgentStatusBar({ taskCount }: { taskCount: number }) {
   )
 }
 
+// ── Nudge history types & helpers ─────────────────────────────────────────────
+
+interface NudgeHistoryItem {
+  id: string
+  message: string
+  sent_at: string
+  user_response: string | null
+  dismissed: boolean
+  task_id: string | null
+}
+
+function relativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime()
+  const h = Math.floor(diff / 3600000)
+  if (h < 1) return 'Just now'
+  if (h < 24) return `${h}h ago`
+  const d = Math.floor(h / 24)
+  if (d === 1) return 'Yesterday'
+  return `${d}d ago`
+}
+
+function formatEventTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+}
+
 // ── Add task inline ───────────────────────────────────────────────────────────
 
-function QuickAddTask({ onAdd }: { onAdd: (title: string) => void }) {
+const PRIORITY_DOTS: { p: number; color: string }[] = [
+  { p: 1, color: '#E0DFF7' },
+  { p: 2, color: '#9B97CC' },
+  { p: 3, color: '#A29BFE' },
+  { p: 4, color: '#E67E22' },
+  { p: 5, color: '#FF4757' },
+]
+
+function QuickAddTask({ onAdd }: { onAdd: (title: string, priority: number) => void }) {
   const [value, setValue] = useState('')
   const [active, setActive] = useState(false)
+  const [priority, setPriority] = useState(3)
 
   function submit() {
     if (!value.trim()) return
-    onAdd(value.trim())
+    onAdd(value.trim(), priority)
     setValue('')
+    setPriority(3)
     setActive(false)
   }
 
@@ -125,30 +160,50 @@ function QuickAddTask({ onAdd }: { onAdd: (title: string) => void }) {
     <div style={{ padding: '6px 12px 10px' }}>
       {active ? (
         <div style={{
-          display: 'flex', gap: 6, alignItems: 'center',
-          background: 'white', borderRadius: 10, padding: '6px 10px',
+          display: 'flex', flexDirection: 'column', gap: 6,
+          background: 'white', borderRadius: 10, padding: '8px 10px',
           border: '1.5px solid rgba(90,83,225,0.3)',
         }}>
-          <input
-            autoFocus
-            value={value}
-            onChange={e => setValue(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setActive(false) }}
-            placeholder="Task title..."
-            style={{
-              flex: 1, border: 'none', outline: 'none', background: 'none',
-              fontSize: 13, color: '#1a1730', fontFamily: 'inherit',
-            }}
-          />
-          <button onClick={submit} style={{
-            padding: '3px 10px', borderRadius: 7, border: 'none',
-            background: '#5A53E1', color: 'white', fontSize: 11,
-            fontWeight: 600, cursor: 'pointer',
-          }}>Add</button>
-          <button onClick={() => setActive(false)} style={{
-            border: 'none', background: 'none', color: '#9B97CC',
-            cursor: 'pointer', fontSize: 14, padding: '0 2px',
-          }}>✕</button>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input
+              autoFocus
+              value={value}
+              onChange={e => setValue(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setActive(false) }}
+              placeholder="Task title..."
+              style={{
+                flex: 1, border: 'none', outline: 'none', background: 'none',
+                fontSize: 13, color: '#1a1730', fontFamily: 'inherit',
+              }}
+            />
+            <button onClick={submit} style={{
+              padding: '3px 10px', borderRadius: 7, border: 'none',
+              background: '#5A53E1', color: 'white', fontSize: 11,
+              fontWeight: 600, cursor: 'pointer',
+            }}>Add</button>
+            <button onClick={() => setActive(false)} style={{
+              border: 'none', background: 'none', color: '#9B97CC',
+              cursor: 'pointer', fontSize: 14, padding: '0 2px',
+            }}>✕</button>
+          </div>
+          {/* Priority selector */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 2 }}>
+            <span style={{ fontSize: 10, color: '#9B97CC', fontFamily: 'IBM Plex Mono, monospace' }}>Priority</span>
+            {PRIORITY_DOTS.map(({ p, color }) => (
+              <button
+                key={p}
+                onClick={() => setPriority(p)}
+                title={`Priority ${p}`}
+                style={{
+                  width: 12, height: 12, borderRadius: '50%', border: 'none',
+                  background: priority >= p ? color : 'transparent',
+                  outline: `2px solid ${color}`,
+                  outlineOffset: priority === p ? 1 : 0,
+                  cursor: 'pointer', padding: 0, transition: 'all 0.1s',
+                }}
+              />
+            ))}
+          </div>
         </div>
       ) : (
         <button onClick={() => setActive(true)} style={{
@@ -171,7 +226,7 @@ export default function ChatApp() {
   const { messages, tasks, isLoading, backendUrl, addMessage, setTasks, updateTaskStatus, setLoading, setBackendUrl } =
     useChatStore()
   const [input, setInput] = useState('')
-  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'settings'>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'history' | 'settings'>('chat')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const greetingShown = useRef(false)
@@ -179,6 +234,8 @@ export default function ChatApp() {
   const [userName, setUserName] = useState(() => localStorage.getItem('flaxie_user_name') || '')
   const [teamMembers, setTeamMembers] = useState<{user_id: string, name: string}[]>([])
   const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null)
+  const [nudgeHistory, setNudgeHistory] = useState<NudgeHistoryItem[]>([])
+  const [historyLoaded, setHistoryLoaded] = useState(false)
   const isOnboarding = !userId
 
   // Init backend URL + tell main process the real user ID for WebSocket
@@ -196,23 +253,41 @@ export default function ChatApp() {
       .then(r => r.json()).then(setTasks).catch(() => {})
   }, [backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Greeting — once per session (not every window open)
+  // Greeting — once per session; load history first if available
   useEffect(() => {
     if (!userId || !backendUrl || greetingShown.current || messages.length > 0) return
     greetingShown.current = true
 
     const firstName = userName ? userName.split(' ')[0] : ''
-    fetch(`${backendUrl}/api/chat/greeting?user_id=${userId}&user_name=${encodeURIComponent(userName)}`)
-      .then(r => r.json())
-      .then(data => {
+
+    async function loadHistoryOrGreet() {
+      // Try to load chat history first
+      try {
+        const histRes = await fetch(`${backendUrl}/api/chat/history?user_id=${userId}&limit=50`)
+        const histData = await histRes.json()
+        if (Array.isArray(histData) && histData.length > 0) {
+          histData.forEach((msg: any) => addMessage({
+            id: msg.id,
+            role: msg.role,
+            content: msg.content,
+            timestamp: new Date(msg.created_at),
+          }))
+          setActiveTab('chat')
+          return
+        }
+      } catch { /* fall through to greeting */ }
+
+      // No history — show greeting
+      try {
+        const r = await fetch(`${backendUrl}/api/chat/greeting?user_id=${userId}&user_name=${encodeURIComponent(userName)}`)
+        const data = await r.json()
         addMessage({
           id: 'welcome',
           role: 'assistant',
           content: data.message || `Hey${firstName ? `, ${firstName}` : ''}! What are you working on?`,
           timestamp: new Date(),
         })
-      })
-      .catch(() => {
+      } catch {
         const h = new Date().getHours()
         addMessage({
           id: 'welcome', role: 'assistant', timestamp: new Date(),
@@ -220,8 +295,20 @@ export default function ChatApp() {
             : h < 17 ? `Hey${firstName ? `, ${firstName}` : ''}! What are you working on?`
             : `Evening${firstName ? `, ${firstName}` : ''}! How's the day going?`,
         })
-      })
+      }
+    }
+
+    loadHistoryOrGreet()
   }, [userId, backendUrl]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load nudge history when history tab is activated
+  useEffect(() => {
+    if (activeTab !== 'history' || historyLoaded || !backendUrl || !userId) return
+    fetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=20`)
+      .then(r => r.json())
+      .then(data => { setNudgeHistory(data); setHistoryLoaded(true) })
+      .catch(() => setHistoryLoaded(true))
+  }, [activeTab, historyLoaded, backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load team members for assignment UI
   useEffect(() => {
@@ -335,6 +422,17 @@ export default function ChatApp() {
     } catch { updateTaskStatus(taskId, 'open') }
   }
 
+  async function handleTaskUpdate(taskId: string, patch: object) {
+    try {
+      await fetch(`${backendUrl}/api/tasks/${taskId}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      })
+      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      setTasks(await tr.json())
+    } catch {}
+  }
+
   async function archiveDoneTasks() {
     const done = tasks.filter(t => t.status === 'done')
     await Promise.all(done.map(t =>
@@ -344,11 +442,11 @@ export default function ChatApp() {
     setTasks(await tr.json())
   }
 
-  async function quickAddTask(title: string) {
+  async function quickAddTask(title: string, priority = 3) {
     try {
       const res = await fetch(`${backendUrl}/api/tasks`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, user_id: userId, status: 'open' }),
+        body: JSON.stringify({ title, user_id: userId, status: 'open', priority }),
       })
       const t = await res.json()
       const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
@@ -477,25 +575,36 @@ export default function ChatApp() {
         borderBottom: '1px solid rgba(90,83,225,0.08)',
         padding: '0 14px',
       }}>
-        {(['chat', 'tasks', 'settings'] as const).map(tab => (
-          <button key={tab} onClick={() => setActiveTab(tab)} style={{
-            padding: '8px 14px 9px', fontSize: 12, fontWeight: 600,
-            cursor: 'pointer', border: 'none', background: 'none',
-            color: activeTab === tab ? '#5A53E1' : '#9B97CC',
-            borderBottom: activeTab === tab ? '2px solid #5A53E1' : '2px solid transparent',
-            transition: 'all 0.15s', textTransform: 'capitalize', letterSpacing: '0.01em',
-          }}>
-            {tab}
-            {tab === 'tasks' && openTasks.length > 0 && (
-              <span style={{
-                marginLeft: 5, background: '#5A53E1', color: 'white',
-                borderRadius: 10, fontSize: 9, padding: '1px 5px', fontWeight: 700,
-              }}>
-                {openTasks.length}
-              </span>
-            )}
-          </button>
-        ))}
+        {(['chat', 'tasks', 'history', 'settings'] as const).map(tab => {
+          const unreadNudges = nudgeHistory.filter(n => !n.user_response && !n.dismissed).length
+          return (
+            <button key={tab} onClick={() => setActiveTab(tab)} style={{
+              padding: '8px 14px 9px', fontSize: 12, fontWeight: 600,
+              cursor: 'pointer', border: 'none', background: 'none',
+              color: activeTab === tab ? '#5A53E1' : '#9B97CC',
+              borderBottom: activeTab === tab ? '2px solid #5A53E1' : '2px solid transparent',
+              transition: 'all 0.15s', textTransform: 'capitalize', letterSpacing: '0.01em',
+            }}>
+              {tab}
+              {tab === 'tasks' && openTasks.length > 0 && (
+                <span style={{
+                  marginLeft: 5, background: '#5A53E1', color: 'white',
+                  borderRadius: 10, fontSize: 9, padding: '1px 5px', fontWeight: 700,
+                }}>
+                  {openTasks.length}
+                </span>
+              )}
+              {tab === 'history' && unreadNudges > 0 && (
+                <span style={{
+                  marginLeft: 5, background: '#E67E22', color: 'white',
+                  borderRadius: 10, fontSize: 9, padding: '1px 5px', fontWeight: 700,
+                }}>
+                  {unreadNudges}
+                </span>
+              )}
+            </button>
+          )
+        })}
       </div>
 
       {/* ── Content ── */}
@@ -565,8 +674,8 @@ export default function ChatApp() {
                         <SectionLabel color="#E67E22">Assigned to me · {assignedToMeTasks.length}</SectionLabel>
                         {assignedToMeTasks.map(t => (
                           <TaskChip key={t.id} task={t} onDone={markTaskDone}
-                            currentUserId={userId}
-                            teamMembers={teamMembers}
+                            currentUserId={userId} teamMembers={teamMembers}
+                            onUpdate={handleTaskUpdate} backendUrl={backendUrl}
                           />
                         ))}
                       </div>
@@ -576,11 +685,10 @@ export default function ChatApp() {
                         <SectionLabel color="#5A53E1">Open · {myOwnTasks.length}</SectionLabel>
                         {myOwnTasks.map(t => (
                           <TaskChip key={t.id} task={t} onDone={markTaskDone}
-                            currentUserId={userId}
-                            teamMembers={teamMembers}
-                            onAssign={assignTask}
-                            assigningTaskId={assigningTaskId}
+                            currentUserId={userId} teamMembers={teamMembers}
+                            onAssign={assignTask} assigningTaskId={assigningTaskId}
                             setAssigningTaskId={setAssigningTaskId}
+                            onUpdate={handleTaskUpdate} backendUrl={backendUrl}
                           />
                         ))}
                       </div>
@@ -590,11 +698,10 @@ export default function ChatApp() {
                         <SectionLabel color="#A29BFE">I'm watching · {watchingTasks.length}</SectionLabel>
                         {watchingTasks.map(t => (
                           <TaskChip key={t.id} task={t}
-                            currentUserId={userId}
-                            teamMembers={teamMembers}
-                            onAssign={assignTask}
-                            assigningTaskId={assigningTaskId}
+                            currentUserId={userId} teamMembers={teamMembers}
+                            onAssign={assignTask} assigningTaskId={assigningTaskId}
                             setAssigningTaskId={setAssigningTaskId}
+                            onUpdate={handleTaskUpdate} backendUrl={backendUrl}
                           />
                         ))}
                       </div>
@@ -620,11 +727,10 @@ export default function ChatApp() {
                         <SectionLabel color="#E67E22">Urgent · {urgentTasks.length}</SectionLabel>
                         {urgentTasks.map(t => (
                           <TaskChip key={t.id} task={t} onDone={markTaskDone}
-                            currentUserId={userId}
-                            teamMembers={teamMembers}
-                            onAssign={assignTask}
-                            assigningTaskId={assigningTaskId}
+                            currentUserId={userId} teamMembers={teamMembers}
+                            onAssign={assignTask} assigningTaskId={assigningTaskId}
                             setAssigningTaskId={setAssigningTaskId}
+                            onUpdate={handleTaskUpdate} backendUrl={backendUrl}
                           />
                         ))}
                       </div>
@@ -636,11 +742,10 @@ export default function ChatApp() {
                         </SectionLabel>
                         {openTasks.filter(t => !urgentTasks.includes(t)).map(t => (
                           <TaskChip key={t.id} task={t} onDone={markTaskDone}
-                            currentUserId={userId}
-                            teamMembers={teamMembers}
-                            onAssign={assignTask}
-                            assigningTaskId={assigningTaskId}
+                            currentUserId={userId} teamMembers={teamMembers}
+                            onAssign={assignTask} assigningTaskId={assigningTaskId}
                             setAssigningTaskId={setAssigningTaskId}
+                            onUpdate={handleTaskUpdate} backendUrl={backendUrl}
                           />
                         ))}
                       </div>
@@ -662,6 +767,85 @@ export default function ChatApp() {
                 )}
               </div>
               <QuickAddTask onAdd={quickAddTask} />
+            </motion.div>
+          )}
+
+          {/* History tab */}
+          {activeTab === 'history' && (
+            <motion.div key="history"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}
+            >
+              <div style={{
+                fontSize: 10, fontWeight: 700, color: '#9B97CC', letterSpacing: '0.08em',
+                textTransform: 'uppercase', marginBottom: 10,
+                fontFamily: 'IBM Plex Mono, monospace',
+              }}>
+                Nudge history
+              </div>
+              {nudgeHistory.length === 0 ? (
+                <div style={{ textAlign: 'center', color: '#9B97CC', marginTop: 40 }}>
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>✦</div>
+                  <div style={{ fontSize: 13 }}>
+                    {historyLoaded ? 'No nudges yet' : 'Loading...'}
+                  </div>
+                </div>
+              ) : (
+                nudgeHistory.map(n => (
+                  <div key={n.id} style={{
+                    background: 'white', borderRadius: 12, padding: '10px 12px',
+                    border: '1px solid rgba(90,83,225,0.1)',
+                    marginBottom: 6, position: 'relative',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+                      {/* Flaxie mini icon */}
+                      <div style={{
+                        width: 18, height: 18, borderRadius: '50%', flexShrink: 0,
+                        background: 'linear-gradient(135deg, #4A42D8, #6B63E8)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        marginTop: 1,
+                      }}>
+                        <svg width="10" height="10" viewBox="0 0 100 100" fill="none">
+                          <g fill="none" stroke="white" strokeWidth="4">
+                            {[0, 72, 144, 216, 288].map((r, i) => (
+                              <ellipse key={i} cx="50" cy="28" rx="10" ry="16" transform={`rotate(${r}, 50, 50)`} />
+                            ))}
+                          </g>
+                          <circle cx="50" cy="50" r="8" fill="white" />
+                        </svg>
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13, color: '#1a1730', lineHeight: 1.4 }}>
+                          {n.message}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 11, color: '#9B97CC' }}>
+                            {relativeTime(n.sent_at)}
+                          </span>
+                          {n.user_response && (
+                            <span style={{
+                              fontSize: 10, fontWeight: 600,
+                              background: 'rgba(90,83,225,0.1)', color: '#5A53E1',
+                              borderRadius: 20, padding: '2px 8px',
+                            }}>
+                              {n.user_response}
+                            </span>
+                          )}
+                          {n.dismissed && !n.user_response && (
+                            <span style={{
+                              fontSize: 10, color: '#9B97CC',
+                              background: 'rgba(155,151,204,0.1)',
+                              borderRadius: 20, padding: '2px 8px',
+                            }}>
+                              dismissed
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
             </motion.div>
           )}
 
@@ -731,13 +915,18 @@ interface SettingsPanelProps {
 
 function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }: SettingsPanelProps) {
   const [profile, setProfile] = useState<{ name: string; email: string; team_id?: string; team_name?: string } | null>(null)
-  const [teamMembers, setTeamMembers] = useState<{ user_id: string; name: string; open_tasks: number }[]>([])
+  const [teamMembers, setTeamMembers] = useState<{ user_id: string; name: string; open_tasks: number; tasks?: any[] }[]>([])
   const [inviteCode, setInviteCode] = useState('')
   const [copied, setCopied] = useState(false)
   const [view, setView] = useState<'idle' | 'create' | 'join'>('idle')
   const [inputVal, setInputVal] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Focus mode
+  const [focusStatus, setFocusStatus] = useState<{ active: boolean; until: string | null }>({ active: false, until: null })
+  // Calendar
+  const [calendarConnected, setCalendarConnected] = useState(false)
+  const [calendarEvents, setCalendarEvents] = useState<{ title: string; start: string; end: string }[]>([])
 
   useEffect(() => {
     if (!backendUrl || !userId) return
@@ -749,6 +938,39 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
       })
       .catch(() => {})
   }, [backendUrl, userId]) // eslint-disable-line
+
+  useEffect(() => {
+    if (!backendUrl || !userId) return
+    fetch(`${backendUrl}/api/auth/focus?user_id=${userId}`)
+      .then(r => r.json())
+      .then(setFocusStatus)
+      .catch(() => {})
+  }, [backendUrl, userId]) // eslint-disable-line
+
+  useEffect(() => {
+    if (!backendUrl || !userId) return
+    fetch(`${backendUrl}/api/calendar/events?user_id=${userId}`)
+      .then(r => r.json())
+      .then(data => {
+        setCalendarConnected(data.connected)
+        setCalendarEvents(data.events || [])
+      })
+      .catch(() => {})
+  }, [backendUrl, userId]) // eslint-disable-line
+
+  async function setFocus(minutes: number) {
+    await fetch(`${backendUrl}/api/auth/focus`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: userId, minutes }),
+    }).catch(() => {})
+    const r = await fetch(`${backendUrl}/api/auth/focus?user_id=${userId}`).catch(() => null)
+    if (r) setFocusStatus(await r.json())
+  }
+
+  async function clearFocus() {
+    await fetch(`${backendUrl}/api/auth/focus?user_id=${userId}`, { method: 'DELETE' }).catch(() => {})
+    setFocusStatus({ active: false, until: null })
+  }
 
   async function loadTeam(teamId: string) {
     try {
@@ -886,26 +1108,34 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
               </button>
             </div>
 
-            {/* Members */}
-            {teamMembers.map(m => (
-              <div key={m.user_id} style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                padding: '6px 0', borderBottom: '1px solid rgba(90,83,225,0.05)',
-              }}>
-                <div style={{
-                  width: 28, height: 28, borderRadius: 9,
-                  background: 'linear-gradient(135deg, #A29BFE, #6B63E8)',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  fontSize: 10, fontWeight: 700, color: 'white', flexShrink: 0,
+            {/* Members with activity */}
+            {teamMembers.map(m => {
+              const overdue = m.tasks?.filter((t: any) => t.deadline && new Date(t.deadline) < new Date()).length || 0
+              return (
+                <div key={m.user_id} style={{
+                  display: 'flex', alignItems: 'center', gap: 10,
+                  padding: '6px 0', borderBottom: '1px solid rgba(90,83,225,0.05)',
                 }}>
-                  {m.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
+                  <div style={{
+                    width: 28, height: 28, borderRadius: 9,
+                    background: 'linear-gradient(135deg, #A29BFE, #6B63E8)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    fontSize: 10, fontWeight: 700, color: 'white', flexShrink: 0,
+                  }}>
+                    {m.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
+                  </div>
+                  <span style={{ fontSize: 12, color: '#1a1730', flex: 1 }}>{m.name}</span>
+                  <span style={{ fontSize: 11, color: '#9B97CC' }}>
+                    {m.open_tasks} open
+                  </span>
+                  {overdue > 0 && (
+                    <span style={{ fontSize: 10, color: '#FF4757', fontWeight: 700 }}>
+                      {overdue} overdue
+                    </span>
+                  )}
                 </div>
-                <span style={{ fontSize: 12, color: '#1a1730', flex: 1 }}>{m.name}</span>
-                <span style={{ fontSize: 11, color: '#9B97CC' }}>
-                  {m.open_tasks} task{m.open_tasks !== 1 ? 's' : ''}
-                </span>
-              </div>
-            ))}
+              )
+            })}
           </>
         ) : (
           <>
@@ -966,6 +1196,119 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
                 </div>
               </div>
             )}
+          </>
+        )}
+      </div>
+
+      {/* Focus Mode */}
+      <div style={sectionStyle}>
+        <div style={labelStyle}>Focus Mode</div>
+        {focusStatus.active && focusStatus.until ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 12, fontWeight: 600, color: '#5A53E1' }}>
+                Active until {new Date(focusStatus.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </div>
+              <div style={{ fontSize: 11, color: '#9B97CC', marginTop: 1 }}>Nudges are paused</div>
+            </div>
+            <button onClick={clearFocus} style={{
+              padding: '4px 10px', borderRadius: 8, border: 'none',
+              background: 'rgba(255,71,87,0.08)', color: '#FF4757',
+              fontSize: 11, fontWeight: 600, cursor: 'pointer',
+            }}>
+              Clear
+            </button>
+          </div>
+        ) : (
+          <div style={{ fontSize: 11, color: '#9B97CC', marginBottom: 8 }}>
+            Pause nudges for a set time
+          </div>
+        )}
+        <div style={{ display: 'flex', gap: 6 }}>
+          {[
+            { label: '30m', minutes: 30 },
+            { label: '1h', minutes: 60 },
+            { label: '2h', minutes: 120 },
+            { label: '4h', minutes: 240 },
+          ].map(({ label, minutes }) => (
+            <button
+              key={label}
+              onClick={() => setFocus(minutes)}
+              style={{
+                flex: 1, padding: '6px 0', borderRadius: 8, border: 'none',
+                background: focusStatus.active ? 'rgba(90,83,225,0.12)' : 'rgba(90,83,225,0.07)',
+                color: '#5A53E1', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                fontFamily: 'inherit', transition: 'background 0.15s',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Calendar */}
+      <div style={sectionStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={labelStyle}>Calendar</div>
+          {calendarConnected && (
+            <span style={{
+              fontSize: 10, fontWeight: 700, color: '#2ED573',
+              background: 'rgba(46,213,115,0.1)', borderRadius: 6, padding: '2px 7px',
+            }}>
+              Connected ✓
+            </span>
+          )}
+        </div>
+        {calendarConnected ? (
+          <>
+            <div style={{ fontSize: 11, color: '#9B97CC', marginBottom: 8 }}>
+              Today: {calendarEvents.length} event{calendarEvents.length !== 1 ? 's' : ''}
+            </div>
+            {calendarEvents.slice(0, 3).map((ev, i) => (
+              <div key={i} style={{
+                fontSize: 11, color: '#1a1730', padding: '3px 0',
+                display: 'flex', gap: 6, alignItems: 'flex-start',
+              }}>
+                <span style={{ color: '#9B97CC', flexShrink: 0 }}>
+                  {formatEventTime(ev.start)}–{formatEventTime(ev.end)}
+                </span>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {ev.title}
+                </span>
+              </div>
+            ))}
+            <button
+              onClick={async () => {
+                await fetch(`${backendUrl}/api/calendar/disconnect?user_id=${userId}`, { method: 'DELETE' }).catch(() => {})
+                setCalendarConnected(false)
+                setCalendarEvents([])
+              }}
+              style={{
+                marginTop: 10, padding: '5px 12px', borderRadius: 8, border: 'none',
+                background: 'rgba(255,71,87,0.07)', color: '#FF4757',
+                fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit',
+              }}
+            >
+              Disconnect
+            </button>
+          </>
+        ) : (
+          <>
+            <div style={{ fontSize: 12, color: '#9B97CC', marginBottom: 10, lineHeight: 1.5 }}>
+              Connect Google Calendar to help Flaxie know when you're in meetings.
+            </div>
+            <button
+              onClick={() => window.open(`${backendUrl}/api/calendar/connect?user_id=${userId}`)}
+              style={{
+                width: '100%', padding: '8px 0', borderRadius: 10, border: 'none',
+                background: 'linear-gradient(135deg, #5A53E1, #7B75F0)',
+                color: 'white', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              Connect Google Calendar ↗
+            </button>
           </>
         )}
       </div>
