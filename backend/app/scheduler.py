@@ -82,7 +82,6 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
                 "priority": t.priority if t.priority is not None else 3,
                 "is_blocked": t.is_blocked or False,
                 "blocked_reason": t.blocked_reason,
-                "is_recurring": t.is_recurring or False,
             }
             for t in result.scalars().all()
         ]

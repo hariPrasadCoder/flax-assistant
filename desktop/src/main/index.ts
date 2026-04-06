@@ -20,6 +20,7 @@ let tray: Tray | null = null
 let wsReconnectTimer: NodeJS.Timeout | null = null
 let wsInstance: any = null
 let wsAlive = true
+let wsConnected = false
 let pendingNotifData: object | null = null
 let activeUserId = 'local'
 
@@ -224,7 +225,11 @@ function startWSRelay() {
     const wsUrl = `${WS_BASE_URL}?user_id=${encodeURIComponent(activeUserId)}`
     const ws = new WS(wsUrl)
     wsInstance = ws
-    ws.on('open', () => console.log(`[ws] connected as ${activeUserId}`))
+    ws.on('open', () => {
+      console.log(`[ws] connected as ${activeUserId}`)
+      wsConnected = true
+      chatWindow?.webContents.send('ws-status', { connected: true })
+    })
     ws.on('message', (data: Buffer) => {
       try {
         const msg = JSON.parse(data.toString()) as {
@@ -245,7 +250,11 @@ function startWSRelay() {
         if (msg.type === 'nudge') chatWindow?.webContents.send('nudge', msg)
       } catch { /* ignore */ }
     })
-    ws.on('close', () => { if (wsAlive) wsReconnectTimer = setTimeout(startWSRelay, 3000) })
+    ws.on('close', () => {
+      wsConnected = false
+      chatWindow?.webContents.send('ws-status', { connected: false })
+      if (wsAlive) wsReconnectTimer = setTimeout(startWSRelay, 3000)
+    })
     ws.on('error', () => {})
   } catch {
     wsReconnectTimer = setTimeout(startWSRelay, 5000)
@@ -267,6 +276,7 @@ function registerIPC() {
   ipcMain.on('dismiss-nudge', () => tray?.setImage(makeTrayIcon('idle')))
   ipcMain.handle('get-backend-url', () => BACKEND_URL)
   ipcMain.handle('get-notif-data', () => pendingNotifData)
+  ipcMain.handle('get-ws-status', () => wsConnected)
 
   // Renderer sends real user ID after login — reconnect WS under correct user
   ipcMain.on('set-user-id', (_event, userId: string) => {

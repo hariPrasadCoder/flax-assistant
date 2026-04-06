@@ -103,13 +103,39 @@ async def get_learnings(
     return [{"id": m.id, "content": m.content} for m in learnings]
 
 
+def _word_overlap(a: str, b: str) -> float:
+    """Jaccard similarity on word sets — quick near-duplicate check."""
+    words_a = set(a.lower().split())
+    words_b = set(b.lower().split())
+    if not words_a or not words_b:
+        return 0.0
+    return len(words_a & words_b) / len(words_a | words_b)
+
+
 async def upsert_learning(
     db: AsyncSession,
     user_id: str,
     content: str,
     importance: float = 0.7,
 ) -> None:
-    """Save a new learning about the user (permanent, high importance)."""
+    """Save a learning about the user — skips insert if a similar one already exists."""
+    existing_result = await db.execute(
+        select(Memory)
+        .where(
+            Memory.user_id == user_id,
+            Memory.type == MemoryType.learning,
+            Memory.compressed == False,
+        )
+    )
+    existing = existing_result.scalars().all()
+
+    # If any existing learning is >60% similar, bump its importance and stop
+    for m in existing:
+        if _word_overlap(content, m.content) > 0.6:
+            m.importance = max(m.importance, importance)
+            await db.flush()
+            return
+
     await save_memory(
         db=db,
         content=content,

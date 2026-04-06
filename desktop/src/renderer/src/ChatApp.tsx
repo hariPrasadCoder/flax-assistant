@@ -81,11 +81,21 @@ function TypingIndicator() {
 
 function AgentStatusBar({ taskCount }: { taskCount: number }) {
   const [pulse, setPulse] = useState(false)
+  const [connected, setConnected] = useState(false)
 
   useEffect(() => {
+    // Get initial state
+    ;(window as any).flaxie?.getWsStatus?.().then((s: boolean) => setConnected(!!s))
+    // Subscribe to changes
+    const unsub = (window as any).flaxie?.onWsStatus?.((s: { connected: boolean }) => setConnected(s.connected))
+    return () => { if (typeof unsub === 'function') unsub() }
+  }, [])
+
+  useEffect(() => {
+    if (!connected) return
     const t = setInterval(() => { setPulse(true); setTimeout(() => setPulse(false), 600) }, 8000)
     return () => clearInterval(t)
-  }, [])
+  }, [connected])
 
   return (
     <div style={{
@@ -93,16 +103,21 @@ function AgentStatusBar({ taskCount }: { taskCount: number }) {
       padding: '5px 14px',
       background: 'rgba(90,83,225,0.04)',
       borderBottom: '1px solid rgba(90,83,225,0.07)',
-      fontSize: 10.5, color: '#9B97CC',
+      fontSize: 10.5, color: connected ? '#9B97CC' : '#BDBDBD',
       fontFamily: 'IBM Plex Mono, monospace',
     }}>
       <motion.div
-        animate={pulse ? { scale: [1, 1.6, 1] } : { scale: 1 }}
+        animate={connected && pulse ? { scale: [1, 1.6, 1] } : { scale: 1 }}
         transition={{ duration: 0.5 }}
-        style={{ width: 6, height: 6, borderRadius: '50%', background: '#2ED573', flexShrink: 0 }}
+        style={{
+          width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+          background: connected ? '#2ED573' : '#BDBDBD',
+        }}
       />
       <span>
-        Agent active · watching {taskCount} task{taskCount !== 1 ? 's' : ''}
+        {connected
+          ? `Agent active · watching ${taskCount} task${taskCount !== 1 ? 's' : ''}`
+          : 'Agent offline · reconnecting…'}
       </span>
     </div>
   )
@@ -422,7 +437,10 @@ export default function ChatApp() {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'done' }),
       })
-      const remaining = tasks.filter(t => t.status !== 'done' && t.id !== taskId).length
+      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      const freshTasks = await tr.json()
+      setTasks(freshTasks)
+      const remaining = freshTasks.filter((t: any) => t.status !== 'done').length
       addMessage({
         id: `done_${Date.now()}`, role: 'assistant', timestamp: new Date(),
         content: remaining === 0

@@ -27,8 +27,14 @@ export default function NotifBanner() {
   const [responding, setResponding] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
 
+  // Auto-dismiss after 30 seconds if no interaction
   useEffect(() => {
-    // No auto-dismiss — stays until user responds
+    if (!visible) return
+    const t = setTimeout(() => dismiss(), 30000)
+    return () => clearTimeout(t)
+  }, [visible]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     const unsub = (window as any).flaxie.onNotifData((d: NotifData) => {
       setData(d)
       requestAnimationFrame(() => requestAnimationFrame(() => {

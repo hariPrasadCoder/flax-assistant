@@ -3,8 +3,10 @@
 
 echo "✦ Starting Flax Assistant..."
 
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
 # Start backend in background
-cd "$(dirname "$0")/backend"
+cd "$ROOT_DIR/backend"
 if [ ! -d "venv" ]; then
   python3 -m venv venv
   source venv/bin/activate
@@ -33,7 +35,7 @@ for i in {1..10}; do
 done
 
 # Start desktop app
-cd "$(dirname "$0")/desktop"
+cd "$ROOT_DIR/desktop"
 npm run dev &
 DESKTOP_PID=$!
 echo "Desktop PID: $DESKTOP_PID"

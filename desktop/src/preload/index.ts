@@ -16,6 +16,14 @@ contextBridge.exposeInMainWorld('flaxie', {
   // Backend URL
   getBackendUrl: () => ipcRenderer.invoke('get-backend-url'),
 
+  // WebSocket connection status
+  getWsStatus: () => ipcRenderer.invoke('get-ws-status'),
+  onWsStatus: (cb: (status: { connected: boolean }) => void) => {
+    const handler = (_: unknown, status: { connected: boolean }) => cb(status)
+    ipcRenderer.on('ws-status', handler)
+    return () => ipcRenderer.removeListener('ws-status', handler)
+  },
+
   // Tell main process the real user ID so WebSocket uses correct user
   setUserId: (userId: string) => ipcRenderer.send('set-user-id', userId),
 

@@ -13,8 +13,6 @@ export interface Task {
   priority?: number
   is_blocked?: boolean
   blocked_reason?: string
-  is_recurring?: boolean
-  recurrence_days?: number
 }
 
 function formatDeadline(deadline?: string): { label: string; urgent: boolean; overdue: boolean } {
@@ -176,11 +174,6 @@ export default function TaskChip({
                 width: 6, height: 6, borderRadius: '50%',
                 background: priorityCfg.dot, flexShrink: 0,
               }} />
-            )}
-
-            {/* Recurring icon */}
-            {task.is_recurring && (
-              <span style={{ fontSize: 11, color: '#9B97CC', flexShrink: 0 }}>↻</span>
             )}
 
             {/* Title — editable */}
