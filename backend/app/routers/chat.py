@@ -1,8 +1,12 @@
+import time
+import uuid
+import logging
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel
+from pydantic import BaseModel, validator
 from typing import Optional, List
 
 from ..database import get_db, AsyncSessionLocal
@@ -11,9 +15,31 @@ from ..ai.brain import chat as ai_chat
 from ..ai.agent import agent_greeting
 from ..ai.memory import get_recent_memories, get_learnings, save_memory, upsert_learning
 from ..websocket_manager import ws_manager
-import uuid
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
+
+
+# Simple in-memory rate limiter — 20 requests per user per minute
+class _RateLimiter:
+    def __init__(self, max_requests: int = 20, window_seconds: int = 60):
+        self._counts: dict = defaultdict(lambda: [0, 0.0])
+        self._max = max_requests
+        self._window = window_seconds
+
+    def check(self, user_id: str) -> None:
+        now = time.monotonic()
+        count, window_start = self._counts[user_id]
+        if now - window_start > self._window:
+            self._counts[user_id] = [1, now]
+            return
+        if count >= self._max:
+            raise HTTPException(status_code=429, detail="Too many requests — slow down a bit")
+        self._counts[user_id][0] += 1
+
+
+_rate_limiter = _RateLimiter()
 
 
 class ChatRequest(BaseModel):
@@ -24,6 +50,15 @@ class ChatRequest(BaseModel):
     nudge_context: Optional[str] = None   # nudge message that triggered this chat
     focal_task_id: Optional[str] = None   # task_id the nudge was about
 
+    @validator('message')
+    def message_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError('Message cannot be empty')
+        return v[:4000]  # truncate to 4000 chars max
+
+    @validator('history')
+    def history_limit(cls, v):
+        return v[-20:]  # keep last 20 messages max
 
 
 @router.get("/history")
@@ -51,6 +86,8 @@ async def get_chat_history(user_id: str, limit: int = 50, db: AsyncSession = Dep
 
 @router.post("")
 async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
+    _rate_limiter.check(req.user_id)
+
     # Fetch tasks for context
     result = await db.execute(
         select(Task)
@@ -140,17 +177,29 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
             }
 
     # Call AI
-    ai_result = await ai_chat(
-        user_message=req.message,
-        history=req.history,
-        tasks=tasks_data,
-        memories=memories,
-        learnings=learnings,
-        recent_nudges=recent_nudges,
-        user_name=req.user_name,
-        nudge_context=req.nudge_context,
-        focal_task=focal_task,
-    )
+    try:
+        ai_result = await ai_chat(
+            user_message=req.message,
+            history=req.history,
+            tasks=tasks_data,
+            memories=memories,
+            learnings=learnings,
+            recent_nudges=recent_nudges,
+            user_name=req.user_name,
+            nudge_context=req.nudge_context,
+            focal_task=focal_task,
+        )
+    except Exception as e:
+        logger.error("AI chat failed for user %s: %s", req.user_id, e, exc_info=True)
+        # Still save user message before returning error
+        db.add(ChatMessage(id=str(uuid.uuid4()), user_id=req.user_id, role="user", content=req.message))
+        await db.commit()
+        return {
+            "reply": "I'm having a moment — could you try again in a few seconds?",
+            "task_refs": [],
+            "tasks_changed": False,
+            "mascot_state": "idle",
+        }
 
     reply = ai_result.get("reply", "...")
     mascot_state = ai_result.get("mascot_state", "listening")

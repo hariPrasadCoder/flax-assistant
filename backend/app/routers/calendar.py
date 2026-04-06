@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import logging
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,8 +10,8 @@ from sqlalchemy import select
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
-import json
-from datetime import datetime, timezone, timedelta
+
+logger = logging.getLogger(__name__)
 
 from ..database import get_db
 from ..models import User
@@ -109,7 +112,7 @@ async def get_today_events(user_id: str, db: AsyncSession = Depends(get_db)):
             events.append({"title": e.get("summary", "Meeting"), "start": start, "end": end})
         return {"events": events, "connected": True}
     except Exception as ex:
-        print(f"[calendar] error: {ex}")
+        logger.error("[calendar] error fetching events for %s: %s", user_id, ex, exc_info=True)
         return {"events": [], "connected": True, "error": str(ex)}
 
 

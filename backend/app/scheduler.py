@@ -15,8 +15,11 @@ and execute whatever the agent decides.
 """
 
 import uuid
+import logging
 import httpx
 from datetime import datetime, timezone, timedelta
+
+logger = logging.getLogger(__name__)
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -202,7 +205,7 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
                     action_options=action_options,
                     task_id=task_id,
                 )
-                print(f"[agent] notified {user_id}: {message[:60]}...")
+                logger.info("[agent] notified %s: %s...", user_id, message[:60])
 
             elif tool_name == "compress_memories":
                 # Agent decided to compress old memories
@@ -218,12 +221,12 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
                 for m in old_memories_res.scalars().all():
                     m.compressed = True
                     compressed_count += 1
-                print(f"[agent] compressed {compressed_count} memories for {user_id}")
+                logger.info("[agent] compressed %d memories for %s", compressed_count, user_id)
 
             elif tool_name == "set_focus_mode":
                 # Agent set focus mode — already executed via HTTP in the tool itself
                 minutes = action.get("minutes", 0)
-                print(f"[agent] focus mode set for {user_id} ({minutes}min)")
+                logger.info("[agent] focus mode set for %s (%dmin)", user_id, minutes)
 
         await db.commit()
 
@@ -236,7 +239,7 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
         id=f"agent_{user_id}",
         replace_existing=True,
     )
-    print(f"[agent] cycle done for {user_id} | state={mascot_state} | next={next_check_minutes}min | actions={len(actions)}")
+    logger.info("[agent] cycle done for %s | state=%s | next=%dmin | actions=%d", user_id, mascot_state, next_check_minutes, len(actions))
 
 
 async def register_user_for_nudges(user_id: str, user_name: str | None = None):
@@ -255,7 +258,7 @@ async def register_user_for_nudges(user_id: str, user_name: str | None = None):
         id=f"agent_{user_id}",
         replace_existing=True,
     )
-    print(f"[agent] registered cycle for {user_id}")
+    logger.info("[agent] registered cycle for %s", user_id)
 
 
 def start_scheduler():
@@ -263,7 +266,7 @@ def start_scheduler():
         scheduler.start()
         # No cron jobs here — the agent handles recurring tasks and memory compression
         # as autonomous decisions via create_task_instance and compress_memories tools.
-        print("[scheduler] started")
+        logger.info("[scheduler] started")
 
 
 def stop_scheduler():

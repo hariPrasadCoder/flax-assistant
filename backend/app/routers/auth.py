@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, validator
 from typing import Optional
 from passlib.context import CryptContext
 from jose import jwt
@@ -34,9 +34,15 @@ def create_token(user_id: str) -> str:
 
 class RegisterRequest(BaseModel):
     name: str
-    email: str
+    email: EmailStr
     password: str
     timezone: Optional[str] = "UTC"
+
+    @validator('name')
+    def name_min_length(cls, v):
+        if len(v.strip()) < 1:
+            raise ValueError('Name cannot be empty')
+        return v.strip()
 
 
 class LoginRequest(BaseModel):

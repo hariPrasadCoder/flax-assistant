@@ -6,8 +6,11 @@ Pushes mascot state changes and nudges in real time.
 """
 
 import json
+import logging
 from fastapi import WebSocket
 from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 
 class WebSocketManager:
@@ -18,11 +21,11 @@ class WebSocketManager:
     async def connect(self, user_id: str, websocket: WebSocket):
         await websocket.accept()
         self.connections[user_id] = websocket
-        print(f"[ws] {user_id} connected ({len(self.connections)} total)")
+        logger.info("[ws] %s connected (%d total)", user_id, len(self.connections))
 
     def disconnect(self, user_id: str):
         self.connections.pop(user_id, None)
-        print(f"[ws] {user_id} disconnected")
+        logger.info("[ws] %s disconnected", user_id)
 
     async def send_mascot_state(self, user_id: str, state: str):
         """Push a mascot state change to the desktop client."""
@@ -48,7 +51,8 @@ class WebSocketManager:
         if ws:
             try:
                 await ws.send_text(json.dumps(data))
-            except Exception:
+            except Exception as e:
+                logger.error("[ws] send failed for %s: %s", user_id, e, exc_info=True)
                 self.disconnect(user_id)
 
     @property
