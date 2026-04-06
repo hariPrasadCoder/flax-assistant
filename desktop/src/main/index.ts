@@ -238,6 +238,8 @@ function startWSRelay() {
           if (state === 'urgent') tray?.setImage(makeTrayIcon('urgent'))
           else if (state === 'alert') tray?.setImage(makeTrayIcon('alert'))
           else tray?.setImage(makeTrayIcon('idle'))
+        } else if (msg.type === 'reflection') {
+          chatWindow?.webContents.send('reflection', msg)
         }
         chatWindow?.webContents.send('mascot-state', msg)
         if (msg.type === 'nudge') chatWindow?.webContents.send('nudge', msg)

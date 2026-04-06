@@ -366,6 +366,22 @@ export default function ChatApp() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, isLoading])
 
+  // Reflection insights — live push from Flaxie when user is connected
+  useEffect(() => {
+    const unsubReflection = (window as any).flaxie?.onReflection?.((data: { message: string; mascot_state: string }) => {
+      if (data.message) {
+        addMessage({
+          id: `reflect_${Date.now()}`,
+          role: 'assistant',
+          content: data.message,
+          timestamp: new Date(),
+        })
+        setActiveTab('chat')
+      }
+    })
+    return () => { if (typeof unsubReflection === 'function') unsubReflection() }
+  }, [addMessage]) // eslint-disable-line react-hooks/exhaustive-deps
+
   const sendMessage = useCallback(async () => {
     const text = input.trim()
     if (!text || isLoading) return

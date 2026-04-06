@@ -242,6 +242,137 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
     logger.info("[agent] cycle done for %s | state=%s | next=%dmin | actions=%d", user_id, mascot_state, next_check_minutes, len(actions))
 
 
+async def run_reflection_cycle(user_id: str, user_name: str | None = None):
+    """
+    Deep thinking cycle — runs once a day.
+    Agent reviews the week, surfaces a genuine insight to chat if warranted.
+    Completely separate from the nudge cycle — different goal, different cadence.
+    """
+    from .ai.brain import reflect
+    from .models import ChatMessage
+    import uuid
+
+    logger.info("[reflection] starting cycle for %s", user_id)
+
+    async with AsyncSessionLocal() as db:
+        # Load user context
+        user_res = await db.execute(select(User).where(User.id == user_id))
+        user = user_res.scalar_one_or_none()
+        if not user:
+            return
+
+        user_tz = user.timezone if user and user.timezone else "UTC"
+        now = datetime.now(timezone.utc)
+
+        # Load open tasks
+        open_result = await db.execute(
+            select(Task)
+            .where(Task.assignee_id == user_id, Task.status != TaskStatus.done)
+            .order_by(Task.deadline.asc().nullslast())
+        )
+        tasks = [
+            {
+                "id": t.id, "title": t.title, "status": t.status.value,
+                "deadline": t.deadline.isoformat() if t.deadline else None,
+                "created_at": t.created_at.isoformat(),
+                "nudge_count": t.nudge_count,
+                "assignee": user_name,
+                "is_blocked": t.is_blocked or False,
+            }
+            for t in open_result.scalars().all()
+        ]
+
+        # Load tasks completed in the last 7 days
+        done_result = await db.execute(
+            select(Task)
+            .where(
+                Task.assignee_id == user_id,
+                Task.status == TaskStatus.done,
+                Task.updated_at >= now - timedelta(days=7),
+            )
+            .order_by(Task.updated_at.desc())
+            .limit(20)
+        )
+        done_tasks = [
+            {"id": t.id, "title": t.title, "completed_at": t.updated_at.isoformat() if t.updated_at else None}
+            for t in done_result.scalars().all()
+        ]
+
+        # Load nudges from last 7 days
+        nudge_result = await db.execute(
+            select(NudgeLog)
+            .where(NudgeLog.user_id == user_id, NudgeLog.sent_at >= now - timedelta(days=7))
+            .order_by(NudgeLog.sent_at.desc())
+            .limit(20)
+        )
+        recent_nudges = [
+            {"message": n.message, "sent_at": n.sent_at.isoformat(), "response": n.user_response}
+            for n in nudge_result.scalars().all()
+        ]
+
+        memories = await get_recent_memories(db, user_id)
+        learnings = await get_learnings(db, user_id)
+
+        # Run the reflection
+        result = await reflect(
+            tasks=tasks,
+            done_tasks=done_tasks,
+            memories=memories,
+            learnings=learnings,
+            recent_nudges=recent_nudges,
+            user_name=user_name,
+            user_tz=user_tz,
+            days_to_review=7,
+        )
+
+        next_hours = result.get("next_reflection_hours", 24)
+
+        if result.get("should_share") and result.get("message"):
+            message = result["message"]
+
+            # Save as a chat message from Flaxie — appears in chat when user opens
+            msg_id = str(uuid.uuid4())
+            db.add(ChatMessage(
+                id=msg_id,
+                user_id=user_id,
+                role="assistant",
+                content=message,
+            ))
+
+            # Also save to memory so future cycles know this was shared
+            await save_memory(
+                db=db,
+                content=f"Flaxie weekly reflection: {message}",
+                memory_type=MemoryType.conversation,
+                user_id=user_id,
+                importance=0.8,
+                ttl_hours=168,  # 7 days
+            )
+
+            # Push live if user is connected — as a chat message, not a notification
+            if user_id in ws_manager.connected_users:
+                await ws_manager.send_reflection(user_id, message, result.get("mascot_state", "idle"))
+
+            logger.info("[reflection] insight shared for %s: %s...", user_id, message[:60])
+        else:
+            logger.info("[reflection] nothing meaningful to share for %s", user_id)
+
+        # Update last_reflection_at
+        user.last_reflection_at = now
+        await db.commit()
+
+    # Schedule next reflection — agent decided the timing
+    next_run = datetime.now(timezone.utc) + timedelta(hours=next_hours)
+    scheduler.add_job(
+        run_reflection_cycle,
+        trigger=DateTrigger(run_date=next_run),
+        args=[user_id, user_name],
+        id=f"reflect_{user_id}",
+        replace_existing=True,
+    )
+    logger.info("[reflection] next cycle for %s in %dh", user_id, next_hours)
+
+
 async def register_user_for_nudges(user_id: str, user_name: str | None = None):
     """Start the agent cycle when a user connects via WebSocket."""
     try:
@@ -249,7 +380,7 @@ async def register_user_for_nudges(user_id: str, user_name: str | None = None):
     except Exception:
         pass
 
-    # First cycle in 20s — let them settle
+    # First nudge cycle in 20s
     first_run = datetime.now(timezone.utc) + timedelta(seconds=20)
     scheduler.add_job(
         run_agent_cycle,
@@ -258,7 +389,22 @@ async def register_user_for_nudges(user_id: str, user_name: str | None = None):
         id=f"agent_{user_id}",
         replace_existing=True,
     )
-    logger.info("[agent] registered cycle for %s", user_id)
+
+    # First reflection in 6 hours (not immediately — needs data to reflect on)
+    # Subsequent reflections are agent-decided (18-36h)
+    try:
+        scheduler.remove_job(f"reflect_{user_id}")
+    except Exception:
+        pass
+    reflect_run = datetime.now(timezone.utc) + timedelta(hours=6)
+    scheduler.add_job(
+        run_reflection_cycle,
+        trigger=DateTrigger(run_date=reflect_run),
+        args=[user_id, user_name],
+        id=f"reflect_{user_id}",
+        replace_existing=True,
+    )
+    logger.info("[scheduler] registered nudge + reflection cycles for %s", user_id)
 
 
 def start_scheduler():

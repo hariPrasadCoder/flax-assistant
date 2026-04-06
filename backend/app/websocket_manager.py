@@ -41,6 +41,14 @@ class WebSocketManager:
             "task_id": task_id,
         })
 
+    async def send_reflection(self, user_id: str, message: str, mascot_state: str = "idle"):
+        """Push a reflection insight as a chat message (not a notification)."""
+        await self._send(user_id, {
+            "type": "reflection",
+            "message": message,
+            "mascot_state": mascot_state,
+        })
+
     async def broadcast_mascot_state(self, state: str):
         """Push a state update to all connected clients (e.g. local single-user mode)."""
         for user_id in list(self.connections.keys()):

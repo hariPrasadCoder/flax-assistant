@@ -34,6 +34,11 @@ contextBridge.exposeInMainWorld('flaxie', {
     ipcRenderer.on('nudge', handler)
     return () => ipcRenderer.removeListener('nudge', handler)
   },
+  onReflection: (cb: (data: object) => void) => {
+    const handler = (_: unknown, data: object) => cb(data)
+    ipcRenderer.on('reflection', handler)
+    return () => ipcRenderer.removeListener('reflection', handler)
+  },
   onChatOpened: (cb: () => void) => {
     ipcRenderer.on('chat-opened', cb)
     return () => ipcRenderer.removeListener('chat-opened', cb)

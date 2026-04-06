@@ -22,6 +22,7 @@ async def init_db():
             "ALTER TABLE tasks ADD COLUMN recurrence_days INTEGER",
             "ALTER TABLE users ADD COLUMN focus_until DATETIME",
             "ALTER TABLE users ADD COLUMN google_calendar_token TEXT",
+            "ALTER TABLE users ADD COLUMN last_reflection_at DATETIME",
         ]:
             try:
                 await conn.execute(text(sql))

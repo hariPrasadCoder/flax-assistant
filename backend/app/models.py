@@ -54,6 +54,9 @@ class User(Base):
     # Google Calendar OAuth tokens (JSON string)
     google_calendar_token = Column(Text, nullable=True)
 
+    # Reflection cycle tracking
+    last_reflection_at = Column(DateTime, nullable=True)
+
     team = relationship("Team", back_populates="users")
     tasks_owned = relationship("Task", foreign_keys="Task.owner_id", back_populates="owner")
     tasks_assigned = relationship("Task", foreign_keys="Task.assignee_id", back_populates="assignee")

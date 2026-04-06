@@ -368,3 +368,151 @@ Respond with JSON:
             "next_check_minutes": 30,
             "task_id": None,
         }
+
+
+async def reflect(
+    tasks: list[dict],
+    done_tasks: list[dict],
+    memories: list[dict],
+    learnings: list[dict],
+    recent_nudges: list[dict],
+    user_name: Optional[str] = None,
+    user_tz: str = "UTC",
+    days_to_review: int = 7,
+) -> dict:
+    """
+    Deep reflection cycle — runs once a day.
+    AI reviews the past week and surfaces a genuine insight to chat.
+    Not a nudge. A real observation worth sharing.
+    Returns: {should_share: bool, message: str, mascot_state: str, next_reflection_hours: int}
+    """
+    if not settings.gemini_api_key:
+        return {"should_share": False, "message": "", "mascot_state": "idle", "next_reflection_hours": 24}
+
+    import json
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+
+    now_utc = datetime.now(timezone.utc)
+    try:
+        local_now = now_utc.astimezone(ZoneInfo(user_tz))
+    except Exception:
+        local_now = now_utc
+
+    name = user_name or "the user"
+
+    # Build rich context for reflection
+    lines = [
+        f"=== REFLECTION CONTEXT ===",
+        f"Today: {local_now.strftime('%A, %B %d %Y at %I:%M %p')} ({user_tz})",
+        f"Reviewing last {days_to_review} days",
+        "",
+    ]
+
+    if tasks:
+        lines.append(f"CURRENTLY OPEN TASKS ({len(tasks)}):")
+        for t in tasks:
+            deadline_str = ""
+            if t.get("deadline"):
+                try:
+                    dl = datetime.fromisoformat(t["deadline"].replace("Z", "+00:00"))
+                    hours = (dl.astimezone(timezone.utc) - now_utc).total_seconds() / 3600
+                    if hours < 0:
+                        deadline_str = f" [OVERDUE {abs(int(hours))}h]"
+                    elif hours < 24:
+                        deadline_str = f" [due in {int(hours)}h]"
+                    else:
+                        deadline_str = f" [due in {int(hours/24)}d]"
+                except Exception:
+                    pass
+            created = datetime.fromisoformat(t.get("created_at", now_utc.isoformat()).replace("Z", "+00:00"))
+            days_open = (now_utc.astimezone(timezone.utc) - created.astimezone(timezone.utc)).days
+            lines.append(
+                f"  [{t['status'].upper()}] {t['title']}{deadline_str} | open {days_open}d | nudged {t.get('nudge_count', 0)}x"
+                + (f" | assignee: {t.get('assignee', '')}" if t.get('assignee') else "")
+                + (" [BLOCKED]" if t.get('is_blocked') else "")
+            )
+        lines.append("")
+
+    if done_tasks:
+        lines.append(f"COMPLETED IN LAST {days_to_review} DAYS ({len(done_tasks)}):")
+        for t in done_tasks:
+            lines.append(f"  ✓ {t['title']}")
+        lines.append("")
+    else:
+        lines.append(f"COMPLETED IN LAST {days_to_review} DAYS: None")
+        lines.append("")
+
+    if learnings:
+        lines.append("WHAT I KNOW ABOUT THIS USER:")
+        for l in learnings[-8:]:
+            lines.append(f"  • {l['content']}")
+        lines.append("")
+
+    if recent_nudges:
+        lines.append(f"NUDGES SENT THIS WEEK:")
+        responded = sum(1 for n in recent_nudges if n.get('response'))
+        lines.append(f"  {len(recent_nudges)} nudges sent, {responded} responded to")
+        for n in recent_nudges[-5:]:
+            response_str = f" → '{n['response']}'" if n.get('response') else " (no response)"
+            lines.append(f"  • {n['message'][:80]}{response_str}")
+        lines.append("")
+
+    lines.append("=== END CONTEXT ===")
+    context_str = "\n".join(lines)
+
+    prompt = f"""You are Flaxie, an AI accountability partner. You've been watching {name}'s work for the past week.
+
+{context_str}
+
+Your task: reflect deeply on what you observe. Look for patterns, risks, and genuine insights that would actually help {name}.
+
+Think about:
+- Velocity: Are tasks moving forward or stalling? Compare open count vs completed
+- Patterns: Are certain types of tasks always getting stuck? Always overdue?
+- Team dynamics: Are there accountability gaps in delegated tasks?
+- Urgency creep: Are deadlines piling up?
+- Wins worth acknowledging: Did they power through something hard?
+- Honest observations: Are they overcommitted? Under-focused?
+
+RULES:
+- Only share if you have something GENUINELY useful to say — not a generic observation
+- Be specific. Reference actual task names, actual numbers, actual patterns you observed
+- Be honest and warm, like a smart colleague who actually cares
+- If nothing meaningful stands out, say so (should_share: false)
+- One focused insight is better than three vague ones
+- Don't repeat things already said in recent nudges
+
+Respond with JSON:
+{{
+  "should_share": true or false,
+  "message": "The insight to share in chat — 2-4 sentences max, conversational, specific. Empty string if should_share is false.",
+  "mascot_state": "idle|alert|celebrating|concerned",
+  "next_reflection_hours": 18-36
+}}"""
+
+    langfuse = get_langfuse_client()
+
+    try:
+        raw = await llm_complete(
+            system="You are Flaxie, an AI accountability partner doing a weekly reflection.",
+            messages=[{"role": "user", "content": prompt}],
+            model="gemini/gemini-2.5-flash",
+            temperature=0.7,
+            max_tokens=512,
+            json_mode=True,
+            trace_name="flaxie-reflection",
+            trace_user_id=user_name,
+            langfuse_client=langfuse,
+        )
+        result = json.loads(raw)
+        result.setdefault("should_share", False)
+        result.setdefault("message", "")
+        result.setdefault("mascot_state", "idle")
+        result.setdefault("next_reflection_hours", 24)
+        return result
+    except Exception as e:
+        logger.error("[brain] reflect() failed: %s", e, exc_info=True)
+        return {"should_share": False, "message": "", "mascot_state": "idle", "next_reflection_hours": 24}
