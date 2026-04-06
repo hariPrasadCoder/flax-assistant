@@ -15,3 +15,8 @@ websockets==13.1
 google-api-python-client==2.149.0
 google-auth-oauthlib==1.2.1
 tzdata==2024.2
+sentry-sdk[fastapi]>=2.0.0
+slowapi>=0.1.9
+litellm>=1.40.0
+langfuse>=3.7.0
+tenacity>=8.0.0

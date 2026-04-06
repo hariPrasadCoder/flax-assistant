@@ -16,6 +16,7 @@ The graph:
 """
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Annotated, Any, Optional, List
@@ -28,6 +29,9 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from ..config import settings
+from .llm import get_langfuse_client
+
+logger = logging.getLogger(__name__)
 
 
 # ── Agent state ───────────────────────────────────────────────────────────────
@@ -633,7 +637,7 @@ def think_node(state: AgentState) -> AgentState:
         response = llm.invoke(state["messages"])
         return {"messages": [response]}
     except Exception as e:
-        print(f"[agent] think_node error: {e}")
+        logger.error("[agent] think_node error: %s", e, exc_info=True)
         # Return a silent fallback so act_node has nothing to execute
         from langchain_core.messages import AIMessage
         return {"messages": [AIMessage(content="")]}
@@ -706,7 +710,7 @@ def build_agent_graph(extra_tools: Optional[List] = None) -> Any:
             response = llm.invoke(state["messages"])
             return {"messages": [response]}
         except Exception as e:
-            print(f"[agent] think error: {e}")
+            logger.error("[agent] think error: %s", e, exc_info=True)
             from langchain_core.messages import AIMessage
             return {"messages": [AIMessage(content="")]}
 
@@ -780,6 +784,19 @@ async def run_agent(
     Run Flaxie's autonomous agent cycle.
     Returns: { actions, mascot_state, next_check_minutes }
     """
+    langfuse = get_langfuse_client()
+    trace = None
+    if langfuse:
+        try:
+            trace = langfuse.trace(
+                name="flaxie-scheduler-cycle",
+                user_id=user_id,
+                tags=["scheduler", "nudge-decision"],
+                input={"task_count": len(tasks), "user_tz": user_tz},
+            )
+        except Exception:
+            pass
+
     get_tasks_tool, write_task_tool, set_focus_tool, create_task_instance_tool, compress_memories_tool = build_task_tools(user_id or "local")
     graph = build_agent_graph(extra_tools=[get_tasks_tool, write_task_tool, set_focus_tool, create_task_instance_tool, compress_memories_tool])
 
@@ -802,13 +819,40 @@ async def run_agent(
         "iteration": 0,
     }
 
-    result = await graph.ainvoke(initial_state)
+    try:
+        result = await graph.ainvoke(initial_state)
 
-    return {
-        "actions": result.get("actions_taken", []),
-        "mascot_state": result.get("mascot_state", "idle"),
-        "next_check_minutes": max(5, min(240, result.get("next_check_minutes", 30))),
-    }
+        output = {
+            "actions": result.get("actions_taken", []),
+            "mascot_state": result.get("mascot_state", "idle"),
+            "next_check_minutes": max(5, min(240, result.get("next_check_minutes", 30))),
+        }
+
+        if trace:
+            try:
+                trace.update(output={
+                    "actions": len(output["actions"]),
+                    "mascot_state": output["mascot_state"],
+                    "next_check_minutes": output["next_check_minutes"],
+                })
+            except Exception:
+                pass
+
+        return output
+
+    except Exception as e:
+        logger.error("[agent] run_agent failed for user %s: %s", user_id, e, exc_info=True)
+        if trace:
+            try:
+                trace.update(output={"error": str(e)}, level="ERROR")
+            except Exception:
+                pass
+        # Return safe default instead of crashing
+        return {
+            "mascot_state": "idle",
+            "next_check_minutes": 30,
+            "actions": [],
+        }
 
 
 async def agent_greeting(

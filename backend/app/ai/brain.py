@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 """
-Flaxie's AI brain — powered by Gemini.
+Flaxie's AI brain — powered by LiteLLM (Gemini backend).
 
 Every call injects:
   - Current time + day context
@@ -13,14 +13,13 @@ Every call injects:
 This gives Flaxie "consciousness" about the current moment + history.
 """
 
+import logging
 from datetime import datetime, timezone
 from typing import Optional
-import google.generativeai as genai
 from ..config import settings
+from .llm import llm_complete, get_langfuse_client
 
-# Configure Gemini
-if settings.gemini_api_key:
-    genai.configure(api_key=settings.gemini_api_key)
+logger = logging.getLogger(__name__)
 
 FLAXIE_SYSTEM_PROMPT = """You are Flaxie — an AI accountability partner and team project manager who lives on your users' desktops as an animated flower.
 
@@ -241,28 +240,28 @@ async def chat(
 
     system = f"{FLAXIE_SYSTEM_PROMPT}\n\n{nudge_block}{name_prefix}{context}"
 
-    # Build conversation history for Gemini
-    gemini_history = []
-    for msg in history[-12:]:  # Last 6 exchanges
-        role = "user" if msg["role"] == "user" else "model"
-        gemini_history.append({"role": role, "parts": [msg["content"]]})
+    # Convert history to OpenAI format for LiteLLM
+    lm_messages = []
+    for msg in history[-12:]:
+        role = "user" if msg["role"] == "user" else "assistant"
+        lm_messages.append({"role": role, "content": msg["content"]})
+    lm_messages.append({"role": "user", "content": user_message})
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            system_instruction=system,
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.85,
-                "max_output_tokens": 2048,
-            },
-        )
-
-        chat_session = model.start_chat(history=gemini_history)
-        response = await chat_session.send_message_async(user_message)
-
         import json
-        raw = response.text.strip()
+        langfuse = get_langfuse_client()
+        raw = await llm_complete(
+            system=system,
+            messages=lm_messages,
+            model="gemini/gemini-2.5-flash",
+            temperature=0.85,
+            max_tokens=2048,
+            json_mode=True,
+            trace_name="flaxie-chat",
+            trace_user_id=None,  # user_id not available in brain.py
+            langfuse_client=langfuse,
+        )
+        raw = raw.strip()
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
@@ -279,9 +278,9 @@ async def chat(
         return result
 
     except Exception as e:
-        print(f"[AI] Gemini error: {e}")
+        logger.error("[brain] LLM chat failed: %s", e, exc_info=True)
         return {
-            "reply": "I'm having a moment — could you try again?",
+            "reply": "I'm having a moment — could you try again in a few seconds?",
             "tasks_to_create": [],
             "tasks_to_update": [],
             "task_refs": [],
@@ -314,7 +313,7 @@ async def decide_nudge(
     context = build_context(tasks, memories, learnings, recent_nudges)
     name = user_name or "the user"
 
-    prompt = f"""You are deciding whether to proactively nudge {name} right now.
+    nudge_prompt = f"""You are deciding whether to proactively nudge {name} right now.
 
 {context}
 
@@ -338,17 +337,19 @@ Respond with JSON:
 }}"""
 
     try:
-        model = genai.GenerativeModel(
-            model_name="gemini-2.5-flash",
-            generation_config={
-                "response_mime_type": "application/json",
-                "temperature": 0.7,
-                "max_output_tokens": 256,
-            },
-        )
-        response = await model.generate_content_async(prompt)
         import json
-        result = json.loads(response.text)
+        langfuse = get_langfuse_client()
+        raw = await llm_complete(
+            system="You are Flaxie, an AI accountability partner.",
+            messages=[{"role": "user", "content": nudge_prompt}],
+            model="gemini/gemini-2.5-flash",
+            temperature=0.7,
+            max_tokens=256,
+            json_mode=True,
+            trace_name="flaxie-nudge-decision",
+            langfuse_client=langfuse,
+        )
+        result = json.loads(raw.strip())
         result.setdefault("should_nudge", False)
         result.setdefault("mascot_state", "idle")
         result.setdefault("nudge_message", None)
@@ -358,7 +359,7 @@ Respond with JSON:
         return result
 
     except Exception as e:
-        print(f"[AI] decide_nudge error: {e}")
+        logger.error("[brain] decide_nudge failed: %s", e, exc_info=True)
         return {
             "should_nudge": False,
             "mascot_state": "idle",
