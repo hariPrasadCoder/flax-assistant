@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+backend/venv/
+
+# Build outputs
+desktop/out/
+desktop/dist/
+
+# Databases
+backend/*.db
+backend/migrations/versions/*.py
+
+# Env files
+.env
+*.env
+backend/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Logs
+*.log
+/tmp/*.log
+
+# macOS
+.DS_Store
+*.DS_Store
+

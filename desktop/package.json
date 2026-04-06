@@ -1,0 +1,50 @@
+{
+  "name": "flax-assistant",
+  "version": "1.0.0",
+  "description": "Flaxie — AI Accountability Agent",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "package": "electron-vite build && electron-builder",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@electron-toolkit/utils": "^3.0.0",
+    "@radix-ui/react-scroll-area": "^1.2.2",
+    "@radix-ui/react-tooltip": "^1.1.6",
+    "date-fns": "^4.1.0",
+    "electron-updater": "^6.3.9",
+    "framer-motion": "^11.15.0",
+    "ws": "^8.18.0",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.0.0",
+    "@types/node": "^22.10.1",
+    "@types/react": "^19.0.1",
+    "@types/react-dom": "^19.0.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.7.2"
+  },
+  "build": {
+    "appId": "com.flax.assistant",
+    "productName": "Flax Assistant",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "resources/icon.icns",
+      "target": ["dmg", "zip"]
+    },
+    "files": ["out/**/*", "resources/**/*"],
+    "extraResources": [
+      { "from": "resources", "to": "resources", "filter": ["**/*"] }
+    ]
+  }
+}
