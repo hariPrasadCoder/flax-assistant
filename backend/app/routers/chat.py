@@ -1,12 +1,12 @@
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
 from typing import Optional, List
 
-from ..database import get_db
-from ..models import Task, TaskStatus, MemoryType, ChatMessage, NudgeLog
+from ..database import get_db, AsyncSessionLocal
+from ..models import Task, TaskStatus, MemoryType, ChatMessage, NudgeLog, User
 from ..ai.brain import chat as ai_chat
 from ..ai.agent import agent_greeting
 from ..ai.memory import get_recent_memories, get_learnings, save_memory, upsert_learning
@@ -21,6 +21,8 @@ class ChatRequest(BaseModel):
     user_id: str
     user_name: Optional[str] = None
     history: list[dict] = []
+    nudge_context: Optional[str] = None   # nudge message that triggered this chat
+    focal_task_id: Optional[str] = None   # task_id the nudge was about
 
 
 
@@ -89,6 +91,54 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
         for n in recent_nudges_result.scalars().all()
     ]
 
+    # Fetch focal task detail if this chat was triggered by a nudge
+    focal_task = None
+    if req.focal_task_id:
+        ft_result = await db.execute(
+            select(Task, User)
+            .join(User, Task.owner_id == User.id, isouter=True)
+            .where(Task.id == req.focal_task_id)
+        )
+        row = ft_result.first()
+        if row:
+            t, owner = row
+            now = datetime.now(timezone.utc)
+            created = t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at
+            days_open = (now - created).days
+            deadline_str = None
+            if t.deadline:
+                dl = t.deadline.replace(tzinfo=timezone.utc) if t.deadline.tzinfo is None else t.deadline
+                hours_left = (dl - now).total_seconds() / 3600
+                if hours_left < 0:
+                    deadline_str = f"OVERDUE by {abs(int(hours_left))}h"
+                elif hours_left < 24:
+                    deadline_str = f"Due in {int(hours_left)}h"
+                else:
+                    deadline_str = f"Due in {int(hours_left/24)}d"
+
+            # Get last nudge message for this task
+            last_nudge_result = await db.execute(
+                select(NudgeLog)
+                .where(NudgeLog.task_id == req.focal_task_id)
+                .order_by(NudgeLog.sent_at.desc())
+                .limit(1)
+            )
+            last_nudge = last_nudge_result.scalar_one_or_none()
+
+            focal_task = {
+                "id": t.id,
+                "title": t.title,
+                "status": t.status.value,
+                "days_open": days_open,
+                "deadline_str": deadline_str,
+                "nudge_count": t.nudge_count,
+                "is_blocked": t.is_blocked or False,
+                "blocked_reason": t.blocked_reason,
+                "owner_name": owner.name if owner and owner.id != req.user_id else None,
+                "owner_id": t.owner_id if t.owner_id != req.user_id else None,
+                "last_nudge_message": last_nudge.message if last_nudge else None,
+            }
+
     # Call AI
     ai_result = await ai_chat(
         user_message=req.message,
@@ -98,6 +148,8 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
         learnings=learnings,
         recent_nudges=recent_nudges,
         user_name=req.user_name,
+        nudge_context=req.nudge_context,
+        focal_task=focal_task,
     )
 
     reply = ai_result.get("reply", "...")
@@ -175,6 +227,93 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
                     # Celebrate!
                     mascot_state = "celebrating"
             task.updated_at = datetime.utcnow()
+            tasks_changed = True
+
+    # Mark task blocked — AI decided this based on user saying they're stuck
+    if ai_result.get("mark_blocked"):
+        mb = ai_result["mark_blocked"]
+        bt_result = await db.execute(select(Task).where(Task.id == mb["task_id"]))
+        bt = bt_result.scalar_one_or_none()
+        if bt:
+            bt.is_blocked = True
+            bt.blocked_reason = mb.get("reason", "")
+            bt.updated_at = datetime.utcnow()
+            tasks_changed = True
+            await save_memory(
+                db=db,
+                content=f"Task '{bt.title}' marked blocked: {mb.get('reason', '')}",
+                memory_type=MemoryType.task_event,
+                user_id=req.user_id,
+                task_id=bt.id,
+                importance=0.8,
+                ttl_hours=72,
+            )
+
+    # Schedule a follow-up reminder — AI decided user committed to a specific time
+    if ai_result.get("schedule_reminder"):
+        sr = ai_result["schedule_reminder"]
+        minutes = int(sr.get("minutes_from_now", 60))
+        reminder_msg = sr.get("message", f"Following up on your task")
+        task_id_for_reminder = sr.get("task_id")
+        from ..scheduler import scheduler
+        from apscheduler.triggers.date import DateTrigger
+        import uuid as uuid_mod
+        reminder_run = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+        async def send_reminder(uid: str, msg: str, tid: str | None):
+            from ..websocket_manager import ws_manager as _ws
+            nudge_id = str(uuid_mod.uuid4())
+            async with AsyncSessionLocal() as rdb:
+                from ..models import NudgeLog as NLog
+                nl = NLog(id=nudge_id, user_id=uid, task_id=tid, message=msg,
+                         action_options="Got it,Let's talk")
+                rdb.add(nl)
+                await rdb.commit()
+            if uid in _ws.connected_users:
+                await _ws.send_nudge(uid, nudge_id, msg, ["Got it", "Let's talk"], tid)
+
+        scheduler.add_job(
+            send_reminder,
+            trigger=DateTrigger(run_date=reminder_run),
+            args=[req.user_id, reminder_msg, task_id_for_reminder],
+            id=f"reminder_{req.user_id}_{task_id_for_reminder or 'general'}",
+            replace_existing=True,
+        )
+
+    # Notify owner — AI decided the owner should know about a blocker
+    if ai_result.get("notify_owner"):
+        no_data = ai_result["notify_owner"]
+        nt_result = await db.execute(select(Task).where(Task.id == no_data["task_id"]))
+        nt = nt_result.scalar_one_or_none()
+        if nt and nt.owner_id and nt.owner_id != req.user_id:
+            owner_msg = no_data.get("message", f"{req.user_name or 'Your teammate'} needs help with '{nt.title}'")
+            import uuid as uuid_mod2
+            owner_nudge_id = str(uuid_mod2.uuid4())
+            owner_nudge = NudgeLog(
+                id=owner_nudge_id,
+                user_id=nt.owner_id,
+                task_id=nt.id,
+                message=owner_msg,
+                action_options="On it,Let's talk",
+            )
+            db.add(owner_nudge)
+            if nt.owner_id in ws_manager.connected_users:
+                await ws_manager.send_nudge(nt.owner_id, owner_nudge_id, owner_msg, ["On it", "Let's talk"], nt.id)
+
+    # Create subtasks — AI decided to break down the task
+    if ai_result.get("create_subtasks"):
+        for sub in ai_result["create_subtasks"]:
+            subtask = Task(
+                title=sub["title"],
+                description=f"Subtask of: {sub.get('parent_task_id', '')}",
+                assignee_id=req.user_id,
+                owner_id=req.user_id,
+                source="chat",
+                is_team_visible=True,
+            )
+            db.add(subtask)
+            await db.flush()
+            task_refs.append({"id": subtask.id, "title": subtask.title})
             tasks_changed = True
 
     # Save chat to DB

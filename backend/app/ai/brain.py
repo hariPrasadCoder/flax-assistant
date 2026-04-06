@@ -78,8 +78,18 @@ Always respond with valid JSON matching this schema:
   ],
   "task_refs": [{"id": "task_id", "title": "task title"}],
   "mascot_state": "idle|alert|listening|celebrating|concerned|dormant|urgent",
-  "memory_to_save": "important insight to remember about this user, or null"
+  "memory_to_save": "important insight to remember about this user, or null",
+  "mark_blocked": {"task_id": "...", "reason": "what they're blocked on"},
+  "schedule_reminder": {"task_id": "...", "minutes_from_now": 120, "message": "Check in on this task"},
+  "notify_owner": {"task_id": "...", "message": "message to send the owner"},
+  "create_subtasks": [{"title": "subtask title", "parent_task_id": "..."}]
 }
+
+All fields except "reply" are optional — only include them when the conversation warrants it:
+- "mark_blocked": use when user says they're blocked, waiting on someone, or can't proceed. Captures the blocker.
+- "schedule_reminder": use when user commits to a specific time ("I'll do it in 2 hours", "tomorrow morning", "after lunch"). Convert to minutes_from_now.
+- "notify_owner": use when user is stuck on a task that has an owner/team lead who should know. Only when it would genuinely help.
+- "create_subtasks": use when user asks to break down a task, or the task seems overwhelming and breaking it down would help.
 """
 
 
@@ -171,6 +181,8 @@ async def chat(
     learnings: list[dict],
     recent_nudges: list[dict],
     user_name: Optional[str] = None,
+    nudge_context: Optional[str] = None,
+    focal_task: Optional[dict] = None,
 ) -> dict:
     """
     Send a message to Flaxie and get a structured response.
@@ -189,7 +201,45 @@ async def chat(
     context = build_context(tasks, memories, learnings, recent_nudges)
     name_prefix = f"The user's name is {user_name}. " if user_name else ""
 
-    system = f"{FLAXIE_SYSTEM_PROMPT}\n\n{name_prefix}{context}"
+    # Build nudge-triggered conversation block if applicable
+    nudge_block = ""
+    if nudge_context or focal_task:
+        lines = [
+            "=== NUDGE-TRIGGERED CONVERSATION ===",
+            "This conversation was opened directly from a nudge notification.",
+            "The user clicked a button on your notification — they want to talk about a specific task.",
+            "",
+        ]
+        if nudge_context:
+            lines.append(f"Nudge that triggered this: \"{nudge_context}\"")
+            lines.append("")
+        if focal_task:
+            ft = focal_task
+            lines.append("FOCAL TASK:")
+            lines.append(f"  Title: {ft.get('title', 'Unknown')}")
+            lines.append(f"  Status: {ft.get('status', 'unknown')}")
+            lines.append(f"  Days in progress: {ft.get('days_open', 0)}")
+            lines.append(f"  Deadline: {ft.get('deadline_str') or 'None set'}")
+            lines.append(f"  Nudged {ft.get('nudge_count', 0)} times total")
+            if ft.get("owner_name"):
+                lines.append(f"  Owner: {ft['owner_name']}")
+            blocked = ft.get("is_blocked", False)
+            blocked_reason = ft.get("blocked_reason")
+            lines.append(f"  Blocked: {blocked}" + (f" ({blocked_reason})" if blocked_reason else ""))
+            if ft.get("last_nudge_message"):
+                lines.append(f"  Last nudge: \"{ft['last_nudge_message']}\"")
+            lines.append(f"  User's button response: \"{user_message}\"")
+            lines.append("")
+        lines += [
+            "Your job: Open with a specific, warm question about THIS task. Don't say \"how can I help?\" —",
+            "dig into what's actually happening. If nudged multiple times with no progress, change strategy:",
+            "ask about the blocker, offer to break it down, or ask if it should be reassigned.",
+            "=== END NUDGE CONTEXT ===",
+            "",
+        ]
+        nudge_block = "\n".join(lines) + "\n"
+
+    system = f"{FLAXIE_SYSTEM_PROMPT}\n\n{nudge_block}{name_prefix}{context}"
 
     # Build conversation history for Gemini
     gemini_history = []
