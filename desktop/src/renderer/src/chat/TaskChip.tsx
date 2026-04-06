@@ -324,51 +324,63 @@ export default function TaskChip({
           </span>
         )}
 
-        {/* Calendar icon for adding/changing deadline */}
-        {!isDone && !dl.label && (
-          <button
-            onClick={() => setShowDatePicker(v => !v)}
-            title="Set deadline"
-            style={{
-              border: 'none', background: 'none', cursor: 'pointer',
-              color: '#C3BFF7', fontSize: 12, padding: '1px 3px',
-              opacity: hovered ? 1 : 0, transition: 'opacity 0.15s', flexShrink: 0,
-            }}
-          >
-            📅
-          </button>
-        )}
+        {/* Hover actions — only rendered when hovered, no reserved space */}
+        {hovered && !isDone && !editing && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0 }}>
+            {/* Edit title */}
+            <button
+              onClick={() => { setEditing(true); setEditValue(task.title) }}
+              title="Edit title"
+              style={{
+                border: 'none', background: 'none', cursor: 'pointer',
+                color: '#C3BFF7', padding: '3px', borderRadius: 5, display: 'flex',
+                transition: 'color 0.12s, background 0.12s',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = '#9B97CC'; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(90,83,225,0.07)' }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = '#C3BFF7'; (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <path d="M11.5 2.5a1.5 1.5 0 0 1 2.12 2.12L5 13.25l-2.75.5.5-2.75L11.5 2.5z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </button>
 
-        {/* Edit button (pencil, shown on hover) */}
-        {!isDone && !editing && (
-          <button
-            onClick={() => { setEditing(true); setEditValue(task.title) }}
-            title="Edit title"
-            style={{
-              border: 'none', background: 'none', cursor: 'pointer',
-              color: '#9B97CC', fontSize: 11, padding: '1px 3px',
-              opacity: hovered ? 1 : 0, transition: 'opacity 0.15s', flexShrink: 0,
-            }}
-          >
-            ✎
-          </button>
-        )}
+            {/* Set / change deadline */}
+            <button
+              onClick={() => setShowDatePicker(v => !v)}
+              title={dl.label ? 'Change deadline' : 'Set deadline'}
+              style={{
+                border: 'none', background: 'none', cursor: 'pointer',
+                color: '#C3BFF7', padding: '3px', borderRadius: 5, display: 'flex',
+                transition: 'color 0.12s, background 0.12s',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = '#9B97CC'; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(90,83,225,0.07)' }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = '#C3BFF7'; (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <rect x="1.5" y="3" width="13" height="11.5" rx="2" stroke="currentColor" strokeWidth="1.5"/>
+                <path d="M5 1.5v3M11 1.5v3M1.5 7h13" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+            </button>
 
-        {/* Block toggle button */}
-        {!isDone && (
-          <button
-            onClick={toggleBlocked}
-            title={task.is_blocked ? 'Unblock' : 'Mark blocked'}
-            style={{
-              border: 'none', background: 'none', cursor: 'pointer',
-              fontSize: 11, padding: '1px 3px', flexShrink: 0,
-              opacity: hovered || task.is_blocked ? 1 : 0,
-              transition: 'opacity 0.15s',
-              color: task.is_blocked ? '#FF4757' : '#9B97CC',
-            }}
-          >
-            ⛔
-          </button>
+            {/* Block / unblock */}
+            <button
+              onClick={toggleBlocked}
+              title={task.is_blocked ? 'Unblock' : 'Mark blocked'}
+              style={{
+                border: 'none', background: 'none', cursor: 'pointer',
+                color: task.is_blocked ? '#FF4757' : '#C3BFF7',
+                padding: '3px', borderRadius: 5, display: 'flex',
+                transition: 'color 0.12s, background 0.12s',
+              }}
+              onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.color = '#FF4757'; (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,71,87,0.07)' }}
+              onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.color = task.is_blocked ? '#FF4757' : '#C3BFF7'; (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.5"/>
+                <path d="M3.5 3.5l9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+            </button>
+          </div>
         )}
 
         {/* Assign button (only for unassigned own tasks when team members exist) */}
