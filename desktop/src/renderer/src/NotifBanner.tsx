@@ -4,6 +4,7 @@ interface NotifData {
   nudgeId: string
   message: string
   taskTitle?: string
+  taskId?: string
   actions: string[]
   backendUrl: string
 }
@@ -72,6 +73,7 @@ export default function NotifBanner() {
         action,
         nudgeMessage: data.message,
         taskTitle: data.taskTitle || null,
+        taskId: data.taskId || null,
       }))
     }
 

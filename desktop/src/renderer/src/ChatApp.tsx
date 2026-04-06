@@ -337,10 +337,12 @@ export default function ChatApp() {
 
       let userText = raw
       let systemHint = ''
+      let taskIdFromNudge: string | null = null
       try {
         const ctx = JSON.parse(raw)
         userText = ctx.taskTitle ? `${ctx.action} (re: "${ctx.taskTitle}")` : ctx.action
         systemHint = ctx.nudgeMessage || ''
+        taskIdFromNudge = ctx.taskId || null
       } catch { /* raw string fallback */ }
 
       setActiveTab('chat')
@@ -354,6 +356,7 @@ export default function ChatApp() {
             user_id: userId, user_name: userName,
             history: useChatStore.getState().messages.slice(-12).map(m => ({ role: m.role, content: m.content })),
             nudge_context: systemHint,
+            focal_task_id: taskIdFromNudge,
           }),
         })
         const data = await res.json()

@@ -133,7 +133,7 @@ function getNotifPosition(): { x: number; y: number } {
   }
 }
 
-function showCustomNotif(nudgeId: string, message: string, taskTitle?: string, actions?: string[]) {
+function showCustomNotif(nudgeId: string, message: string, taskTitle?: string, actions?: string[], taskId?: string) {
   // Close existing notif if any
   if (notifWindow && !notifWindow.isDestroyed()) {
     notifWindow.destroy()
@@ -144,6 +144,7 @@ function showCustomNotif(nudgeId: string, message: string, taskTitle?: string, a
     nudgeId,
     message,
     taskTitle,
+    taskId,
     actions: actions || ['Got it', "Let's talk"],
     backendUrl: BACKEND_URL,
   }
@@ -228,10 +229,10 @@ function startWSRelay() {
       try {
         const msg = JSON.parse(data.toString()) as {
           type: string; state?: string; id?: string
-          message?: string; task_title?: string; action_options?: string[]
+          message?: string; task_title?: string; action_options?: string[]; task_id?: string
         }
         if (msg.type === 'nudge') {
-          showCustomNotif(msg.id || '', msg.message || '', msg.task_title, msg.action_options)
+          showCustomNotif(msg.id || '', msg.message || '', msg.task_title, msg.action_options, msg.task_id)
         } else if (msg.type === 'mascot_state') {
           const state = msg.state as string
           if (state === 'urgent') tray?.setImage(makeTrayIcon('urgent'))
