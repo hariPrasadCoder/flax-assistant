@@ -34,6 +34,30 @@ def infer_action_type(label: str) -> str:
     return "ack"
 
 
+@router.get("/history")
+async def get_nudge_history(user_id: str, limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """Return the last N nudges for a user."""
+    result = await db.execute(
+        select(NudgeLog)
+        .where(NudgeLog.user_id == user_id)
+        .order_by(NudgeLog.sent_at.desc())
+        .limit(limit)
+    )
+    nudges = result.scalars().all()
+    return [
+        {
+            "id": n.id,
+            "message": n.message,
+            "sent_at": n.sent_at.isoformat(),
+            "user_response": n.user_response,
+            "responded_at": n.responded_at.isoformat() if n.responded_at else None,
+            "dismissed": n.dismissed,
+            "task_id": n.task_id,
+        }
+        for n in nudges
+    ]
+
+
 @router.post("/{nudge_id}/respond")
 async def respond_to_nudge(nudge_id: str, body: RespondRequest, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(NudgeLog).where(NudgeLog.id == nudge_id))

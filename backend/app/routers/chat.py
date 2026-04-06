@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from ..database import get_db
 from ..models import Task, TaskStatus, MemoryType, ChatMessage, NudgeLog
@@ -22,6 +22,29 @@ class ChatRequest(BaseModel):
     user_name: Optional[str] = None
     history: list[dict] = []
 
+
+
+@router.get("/history")
+async def get_chat_history(user_id: str, limit: int = 50, db: AsyncSession = Depends(get_db)):
+    """Return the last N chat messages for a user, in chronological order."""
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.user_id == user_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    messages = result.scalars().all()
+    # Reverse to return chronological order
+    messages = list(reversed(messages))
+    return [
+        {
+            "id": m.id,
+            "role": m.role,
+            "content": m.content,
+            "created_at": m.created_at.isoformat(),
+        }
+        for m in messages
+    ]
 
 
 @router.post("")

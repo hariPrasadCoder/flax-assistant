@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     max_nudges_per_task_per_day: int = 4
     nudge_backoff_minutes: int = 45  # min gap between nudges for same task
 
+    # Google Calendar OAuth
+    google_client_id: str = ""
+    google_client_secret: str = ""
+
     class Config:
         env_file = ".env"
 

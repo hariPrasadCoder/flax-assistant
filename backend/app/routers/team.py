@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import secrets
 import uuid
-import random
-import string
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -10,16 +10,9 @@ from pydantic import BaseModel
 from typing import Optional
 
 from ..database import get_db
-from ..models import User, Team, Task, TaskStatus
+from ..models import User, Team, Task, TaskStatus, InviteCode
 
 router = APIRouter(prefix="/api/team", tags=["team"])
-
-# Simple in-memory invite codes (in production: store in DB with TTL)
-_invite_codes: dict[str, str] = {}  # code → team_id
-
-
-def generate_invite_code() -> str:
-    return "".join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
 class CreateTeamRequest(BaseModel):
@@ -44,11 +37,17 @@ async def create_team(data: CreateTeamRequest, db: AsyncSession = Depends(get_db
         raise HTTPException(status_code=404, detail="User not found")
 
     user.team_id = team.id
-    await db.commit()
+    await db.flush()
 
-    # Generate invite code
-    code = generate_invite_code()
-    _invite_codes[code] = team.id
+    # Generate DB-backed invite code
+    code = secrets.token_urlsafe(6).upper()[:8]
+    invite = InviteCode(
+        code=code,
+        team_id=team.id,
+        expires_at=datetime.utcnow() + timedelta(days=7),
+    )
+    db.add(invite)
+    await db.commit()
 
     return {
         "team_id": team.id,
@@ -59,30 +58,45 @@ async def create_team(data: CreateTeamRequest, db: AsyncSession = Depends(get_db
 
 @router.post("/join")
 async def join_team(data: JoinTeamRequest, db: AsyncSession = Depends(get_db)):
-    team_id = _invite_codes.get(data.invite_code)
-    if not team_id:
+    now = datetime.utcnow()
+
+    invite_result = await db.execute(select(InviteCode).where(InviteCode.code == data.invite_code))
+    invite = invite_result.scalar_one_or_none()
+
+    if not invite:
         raise HTTPException(status_code=404, detail="Invalid invite code")
+    if invite.used:
+        raise HTTPException(status_code=400, detail="Invite code already used")
+    if invite.expires_at and invite.expires_at < now:
+        raise HTTPException(status_code=400, detail="Invite code expired")
 
     result = await db.execute(select(User).where(User.id == data.user_id))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    team_result = await db.execute(select(Team).where(Team.id == team_id))
+    team_result = await db.execute(select(Team).where(Team.id == invite.team_id))
     team = team_result.scalar_one_or_none()
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
 
-    user.team_id = team_id
+    user.team_id = invite.team_id
+    invite.used = True
     await db.commit()
 
-    return {"team_id": team_id, "team_name": team.name}
+    return {"team_id": invite.team_id, "team_name": team.name}
 
 
 @router.get("/generate-invite")
-async def generate_invite(team_id: str):
-    code = generate_invite_code()
-    _invite_codes[code] = team_id
+async def generate_invite(team_id: str, db: AsyncSession = Depends(get_db)):
+    code = secrets.token_urlsafe(6).upper()[:8]
+    invite = InviteCode(
+        code=code,
+        team_id=team_id,
+        expires_at=datetime.utcnow() + timedelta(days=7),
+    )
+    db.add(invite)
+    await db.commit()
     return {"invite_code": code}
 
 

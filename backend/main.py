@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.database import init_db
 from app.scheduler import start_scheduler, stop_scheduler
-from app.routers import tasks, chat, websocket, nudges, auth, team
+from app.routers import tasks, chat, websocket, nudges, auth, team, calendar
 
 
 @asynccontextmanager
@@ -43,6 +43,7 @@ app.include_router(tasks.router)
 app.include_router(chat.router)
 app.include_router(nudges.router)
 app.include_router(team.router)
+app.include_router(calendar.router)
 app.include_router(websocket.router)
 
 

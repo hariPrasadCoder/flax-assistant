@@ -22,6 +22,8 @@ class TaskCreate(BaseModel):
     is_team_visible: bool = True
     source: str = "chat"
     user_id: str  # the requesting user
+    priority: Optional[int] = 3
+    is_blocked: Optional[bool] = False
 
 
 class TaskUpdate(BaseModel):
@@ -30,6 +32,11 @@ class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     assignee_id: Optional[str] = None
+    priority: Optional[int] = None  # 1-5
+    is_blocked: Optional[bool] = None
+    blocked_reason: Optional[str] = None
+    is_recurring: Optional[bool] = None
+    recurrence_days: Optional[int] = None
 
 
 class AssignRequest(BaseModel):
@@ -78,6 +85,11 @@ async def list_tasks(user_id: str, db: AsyncSession = Depends(get_db)):
             "created_at": t.created_at.isoformat(),
             "source": t.source,
             "is_team_visible": t.is_team_visible,
+            "priority": t.priority if t.priority is not None else 3,
+            "is_blocked": t.is_blocked or False,
+            "blocked_reason": t.blocked_reason,
+            "is_recurring": t.is_recurring or False,
+            "recurrence_days": t.recurrence_days,
         }
         for t in tasks
     ]
@@ -101,6 +113,8 @@ async def create_task(data: TaskCreate, db: AsyncSession = Depends(get_db)):
         team_id=data.team_id,
         source=data.source,
         is_team_visible=data.is_team_visible,
+        priority=data.priority if data.priority is not None else 3,
+        is_blocked=data.is_blocked or False,
     )
     db.add(task)
     await db.flush()
@@ -149,6 +163,21 @@ async def update_task(task_id: str, data: TaskUpdate, db: AsyncSession = Depends
 
     if data.assignee_id is not None:
         task.assignee_id = data.assignee_id
+
+    if data.priority is not None:
+        task.priority = data.priority
+
+    if data.is_blocked is not None:
+        task.is_blocked = data.is_blocked
+
+    if data.blocked_reason is not None:
+        task.blocked_reason = data.blocked_reason
+
+    if data.is_recurring is not None:
+        task.is_recurring = data.is_recurring
+
+    if data.recurrence_days is not None:
+        task.recurrence_days = data.recurrence_days
 
     task.updated_at = datetime.utcnow()
     await db.commit()

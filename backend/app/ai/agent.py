@@ -38,6 +38,7 @@ class AgentState(TypedDict):
     actions_taken: list     # accumulated actions to execute after the graph runs
     mascot_state: str
     next_check_minutes: int
+    iteration: int          # think→act loop counter (max 3 rounds)
 
 
 # ── Task read/write tools (built per-user via closure) ───────────────────────
@@ -293,20 +294,42 @@ ACTION LABEL CONVENTIONS (the label you write determines what happens when click
 For team tasks (owned by you, assigned to others): generate owner-perspective nudges
 like "Priya hasn't updated 'Design mockup' in 4h — it's due tomorrow" with actions
 ["Got it", "Remind them", "Extend deadline"].
+
+FOCUS / QUIET HOURS: If the context shows the user is in focus mode or it's outside work hours, use be_silent and set next_check_minutes accordingly.
+
+BLOCKED TASKS: If a task is marked is_blocked=True, don't nudge about it — instead periodically ask if the blocker has been resolved.
+
+PRIORITY: Tasks with priority 5 are critical. Priority 1 tasks are background. Factor this into urgency decisions — a priority-5 task due in 3 days matters more than a priority-1 task due today.
+
+GIVE UP THRESHOLD: If a task shows [IGNORED x5], do not nudge about it again this cycle. Consider using write_task to mark it as blocked or suggest the user reconsider it in chat.
+
+CALENDAR: Check TODAY'S CALENDAR before nudging. If the user is IN MEETING NOW, use be_silent. If a meeting starts within 15 minutes, wait until after it ends before scheduling the next check.
 """
 
 
 def build_context_message(context: dict) -> str:
     """Build the context block injected into the agent's system message."""
     now = datetime.now(timezone.utc)
-    day = now.strftime("%A")
-    time_str = now.strftime("%I:%M %p")
-    date_str = now.strftime("%B %d, %Y")
+    user_tz = context.get("user_tz", "UTC")
     name = context.get("user_name") or "the user"
+
+    # Use local time when timezone is available
+    try:
+        from zoneinfo import ZoneInfo
+        local_now = datetime.now(ZoneInfo(user_tz))
+        day = local_now.strftime("%A")
+        time_str = local_now.strftime("%I:%M %p")
+        date_str = local_now.strftime("%B %d, %Y")
+        tz_label = user_tz
+    except Exception:
+        day = now.strftime("%A")
+        time_str = now.strftime("%I:%M %p")
+        date_str = now.strftime("%B %d, %Y")
+        tz_label = "UTC"
 
     lines = [
         f"=== CONTEXT FOR {name.upper()} ===",
-        f"Now: {time_str} on {day}, {date_str} (UTC)",
+        f"Now: {time_str} on {day}, {date_str} ({tz_label})",
         "",
     ]
 
@@ -356,9 +379,39 @@ def build_context_message(context: dict) -> str:
                 except Exception:
                     pass
 
+            # Give-up threshold: nudged 5+ times in 24h with no response
+            ignored_tag = ""
+            nudge_count = t.get("nudge_count", 0)
+            if nudge_count >= 5 and t.get("last_nudged_at"):
+                try:
+                    ln_dt = datetime.fromisoformat(
+                        t["last_nudged_at"].replace("Z", "").replace("+00:00", "")
+                    ).replace(tzinfo=timezone.utc)
+                    if (now - ln_dt).total_seconds() < 86400:
+                        ignored_tag = " [IGNORED x5 — change approach or let it go]"
+                except Exception:
+                    pass
+
+            # Blocked state
+            blocked_tag = ""
+            if t.get("is_blocked"):
+                reason = t.get("blocked_reason", "")
+                blocked_tag = f" [BLOCKED{': ' + reason if reason else ''}]"
+
+            # Priority tag
+            priority = t.get("priority", 3)
+            priority_tag = ""
+            if priority == 5:
+                priority_tag = " [P5-CRITICAL]"
+            elif priority == 1:
+                priority_tag = " [P1-background]"
+            elif priority == 4:
+                priority_tag = " [P4-high]"
+
             lines.append(
-                f"  [{t['id']}]{urgency_tag} \"{t['title']}\" | {t['status'].upper()} | {dl}"
-                f" | open {days_open}d | nudged {t.get('nudge_count', 0)}x{last_nudged}"
+                f"  [{t['id']}]{urgency_tag}{priority_tag}{blocked_tag}{ignored_tag}"
+                f" \"{t['title']}\" | {t['status'].upper()} | {dl}"
+                f" | open {days_open}d | nudged {nudge_count}x{last_nudged}"
             )
     else:
         lines.append("ACTIVE TASKS: none")
@@ -429,6 +482,31 @@ def build_context_message(context: dict) -> str:
             lines.append(f"  {n['sent_at']}: \"{n['message']}\"{resp}")
         lines.append("")
 
+    # Calendar events
+    calendar_events = context.get("calendar_events", [])
+    if calendar_events:
+        lines.append("TODAY'S CALENDAR:")
+        for event in calendar_events:
+            start = event.get("start", "")
+            end = event.get("end", "")
+            title = event.get("title", "Meeting")
+            # Check if currently in this event
+            in_meeting_tag = ""
+            try:
+                start_dt = datetime.fromisoformat(start.replace("Z", "+00:00")) if start else None
+                end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")) if end else None
+                if start_dt and end_dt:
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=timezone.utc)
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                    if start_dt <= now <= end_dt:
+                        in_meeting_tag = " (IN MEETING NOW)"
+            except Exception:
+                pass
+            lines.append(f"  {start} - {end}: {title}{in_meeting_tag}")
+        lines.append("")
+
     lines.append("=== END CONTEXT ===")
     return "\n".join(lines)
 
@@ -445,6 +523,7 @@ def observe_node(state: AgentState) -> AgentState:
         "actions_taken": [],
         "mascot_state": "idle",
         "next_check_minutes": 30,
+        "iteration": 0,
     }
 
 
@@ -509,9 +588,10 @@ def act_node(state: AgentState) -> AgentState:
 
 
 def should_continue(state: AgentState) -> str:
-    """After thinking, if there are tool calls → act. Otherwise → end."""
+    """After thinking, if there are tool calls and within iteration limit → act. Otherwise → end."""
     last_msg = state["messages"][-1]
-    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+    iteration = state.get("iteration", 0)
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls and iteration < 3:
         return "act"
     return "end"
 
@@ -547,6 +627,7 @@ def build_agent_graph(extra_tools: Optional[List] = None) -> Any:
         actions_taken = list(state.get("actions_taken", []))
         mascot_state = state.get("mascot_state", "idle")
         next_check_minutes = state.get("next_check_minutes", 30)
+        iteration = state.get("iteration", 0) + 1
         tool_messages = []
         for call in last_msg.tool_calls:
             tool_fn = tools_by_name.get(call["name"])
@@ -572,6 +653,7 @@ def build_agent_graph(extra_tools: Optional[List] = None) -> Any:
             "actions_taken": actions_taken,
             "mascot_state": mascot_state,
             "next_check_minutes": next_check_minutes,
+            "iteration": iteration,
         }
 
     graph = StateGraph(AgentState)
@@ -582,7 +664,7 @@ def build_agent_graph(extra_tools: Optional[List] = None) -> Any:
     graph.set_entry_point("observe")
     graph.add_edge("observe", "think")
     graph.add_conditional_edges("think", should_continue, {"act": "act", "end": END})
-    graph.add_edge("act", END)
+    graph.add_edge("act", "think")  # loop back for multi-round think→act
 
     return graph.compile()
 
@@ -597,6 +679,8 @@ async def run_agent(
     user_name: Optional[str] = None,
     owned_tasks: Optional[List[dict]] = None,
     user_id: Optional[str] = None,
+    user_tz: Optional[str] = "UTC",
+    calendar_events: Optional[List[dict]] = None,
 ) -> dict:
     """
     Run Flaxie's autonomous agent cycle.
@@ -614,10 +698,13 @@ async def run_agent(
             "recent_nudges": recent_nudges,
             "user_name": user_name,
             "owned_tasks": owned_tasks or [],
+            "user_tz": user_tz or "UTC",
+            "calendar_events": calendar_events or [],
         },
         "actions_taken": [],
         "mascot_state": "idle",
         "next_check_minutes": 30,
+        "iteration": 0,
     }
 
     result = await graph.ainvoke(initial_state)

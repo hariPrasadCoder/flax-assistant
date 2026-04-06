@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -105,6 +105,50 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
         team_name=team_name,
         token=token,
     )
+
+
+class FocusRequest(BaseModel):
+    user_id: str
+    minutes: int
+
+
+@router.post("/focus")
+async def set_focus(data: FocusRequest, db: AsyncSession = Depends(get_db)):
+    """Enable focus/DND mode for N minutes."""
+    result = await db.execute(select(User).where(User.id == data.user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.focus_until = datetime.utcnow() + timedelta(minutes=data.minutes)
+    await db.commit()
+    return {"active": True, "until": user.focus_until.isoformat()}
+
+
+@router.delete("/focus")
+async def clear_focus(user_id: str, db: AsyncSession = Depends(get_db)):
+    """Disable focus/DND mode."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.focus_until = None
+    await db.commit()
+    return {"active": False, "until": None}
+
+
+@router.get("/focus")
+async def get_focus(user_id: str, db: AsyncSession = Depends(get_db)):
+    """Get current focus/DND status."""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    now = datetime.utcnow()
+    active = bool(user.focus_until and user.focus_until > now)
+    return {
+        "active": active,
+        "until": user.focus_until.isoformat() if user.focus_until else None,
+    }
 
 
 @router.get("/me")

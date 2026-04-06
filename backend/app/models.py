@@ -48,6 +48,12 @@ class User(Base):
     timezone = Column(String, default="UTC")
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Focus / DND mode
+    focus_until = Column(DateTime, nullable=True)
+
+    # Google Calendar OAuth tokens (JSON string)
+    google_calendar_token = Column(Text, nullable=True)
+
     team = relationship("Team", back_populates="users")
     tasks_owned = relationship("Task", foreign_keys="Task.owner_id", back_populates="owner")
     tasks_assigned = relationship("Task", foreign_keys="Task.assignee_id", back_populates="assignee")
@@ -85,16 +91,39 @@ class Task(Base):
     nudge_count = Column(Integer, default=0)
     last_nudged_at = Column(DateTime, nullable=True)
 
-    # Source: "chat" (user told Flaxie), "meeting_notes", "manual"
+    # Source: "chat" (user told Flaxie), "meeting_notes", "manual", "recurring"
     source = Column(String, default="chat")
 
     # Is this task visible to the team or private?
     is_team_visible = Column(Boolean, default=True)
 
+    # Priority: 1 (low/background) to 5 (critical)
+    priority = Column(Integer, default=3)
+
+    # Blocked state
+    is_blocked = Column(Boolean, default=False)
+    blocked_reason = Column(String, nullable=True)
+
+    # Recurring task settings
+    is_recurring = Column(Boolean, default=False)
+    recurrence_days = Column(Integer, nullable=True)
+
     owner = relationship("User", foreign_keys=[owner_id], back_populates="tasks_owned")
     assignee = relationship("User", foreign_keys=[assignee_id], back_populates="tasks_assigned")
     team = relationship("Team", back_populates="tasks")
     nudge_logs = relationship("NudgeLog", back_populates="task")
+
+
+# ── Invite Codes ──────────────────────────────────────────────────────────────
+
+class InviteCode(Base):
+    __tablename__ = "invite_codes"
+
+    code = Column(String, primary_key=True)
+    team_id = Column(String, ForeignKey("teams.id"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime, nullable=True)
+    used = Column(Boolean, default=False)
 
 
 # ── Memory Layer ──────────────────────────────────────────────────────────────
