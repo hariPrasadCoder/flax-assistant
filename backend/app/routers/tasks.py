@@ -29,6 +29,12 @@ class TaskUpdate(BaseModel):
     deadline: Optional[str] = None
     title: Optional[str] = None
     description: Optional[str] = None
+    assignee_id: Optional[str] = None
+
+
+class AssignRequest(BaseModel):
+    assignee_id: str
+    owner_id: str  # the user doing the assigning
 
 
 class TaskResponse(BaseModel):
@@ -141,5 +147,22 @@ async def update_task(task_id: str, data: TaskUpdate, db: AsyncSession = Depends
     if data.description is not None:
         task.description = data.description
 
+    if data.assignee_id is not None:
+        task.assignee_id = data.assignee_id
+
     task.updated_at = datetime.utcnow()
+    await db.commit()
     return {"id": task.id, "status": task.status.value}
+
+
+@router.post("/{task_id}/assign")
+async def assign_task(task_id: str, data: AssignRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Task).where(Task.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    task.assignee_id = data.assignee_id
+    task.owner_id = data.owner_id
+    task.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"id": task.id, "assignee_id": task.assignee_id, "owner_id": task.owner_id}

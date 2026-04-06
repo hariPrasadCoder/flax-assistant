@@ -64,17 +64,17 @@ export default function NotifBanner() {
     if (!data || responding) return
     setResponding(true)
     try {
-      await fetch(`${data.backendUrl}/api/nudges/${data.nudgeId}/respond`, {
+      const res = await fetch(`${data.backendUrl}/api/nudges/${data.nudgeId}/respond`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ response: action }),
       })
+      const result = await res.json()
+      if (result.open_chat) {
+        if (result.chat_context) localStorage.setItem('flaxie_nudge_context', result.chat_context)
+        ;(window as any).flaxie.openChat()
+      }
     } catch { /* best effort */ }
-
-    const lower = action.toLowerCase()
-    if (lower.includes('talk') || lower.includes('open') || lower.includes('chat')) {
-      ;(window as any).flaxie.openChat()
-    }
     dismiss()
   }
 

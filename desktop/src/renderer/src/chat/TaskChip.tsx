@@ -6,6 +6,8 @@ export interface Task {
   status: 'open' | 'in_progress' | 'done'
   deadline?: string
   assignee?: string
+  assignee_id?: string
+  owner_id?: string
   nudge_count: number
 }
 
@@ -32,14 +34,20 @@ interface Props {
   task: Task
   onDone?: (id: string) => void
   compact?: boolean
+  teamMembers?: { user_id: string; name: string }[]
+  currentUserId?: string
+  onAssign?: (taskId: string, assigneeId: string) => void
+  assigningTaskId?: string | null
+  setAssigningTaskId?: (id: string | null) => void
 }
 
-export default function TaskChip({ task, onDone, compact }: Props) {
+export default function TaskChip({ task, onDone, compact, teamMembers, currentUserId, onAssign, assigningTaskId, setAssigningTaskId }: Props) {
   const isDone = task.status === 'done'
   const isInProgress = task.status === 'in_progress'
   const dl = formatDeadline(task.deadline)
 
   return (
+    <div style={{ position: 'relative' }}>
     <motion.div
       initial={{ opacity: 0, y: 4 }}
       animate={{ opacity: 1, y: 0 }}
@@ -102,8 +110,64 @@ export default function TaskChip({ task, onDone, compact }: Props) {
         }}>
           {task.title}
         </div>
-        {task.assignee && !compact && (
-          <div style={{ fontSize: 10, color: '#9B97CC', marginTop: 1 }}>@{task.assignee}</div>
+        {!compact && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 1, flexWrap: 'wrap' }}>
+            {task.assignee && (
+              <span style={{ fontSize: 10, color: '#9B97CC' }}>@{task.assignee}</span>
+            )}
+            {task.assignee_id && currentUserId && task.assignee_id !== currentUserId && task.owner_id === currentUserId && (
+              <span style={{
+                fontSize: 10, fontWeight: 600, color: '#5A53E1',
+                background: 'rgba(90,83,225,0.08)', borderRadius: 6, padding: '1px 5px',
+              }}>
+                → {task.assignee || task.assignee_id}
+              </span>
+            )}
+            {task.owner_id && currentUserId && task.owner_id !== currentUserId && task.assignee_id === currentUserId && (
+              <span style={{ fontSize: 10, color: '#9B97CC' }}>
+                from {teamMembers?.find(m => m.user_id === task.owner_id)?.name || task.owner_id}
+              </span>
+            )}
+          </div>
+        )}
+        {/* Assign dropdown */}
+        {assigningTaskId === task.id && teamMembers && teamMembers.length > 0 && setAssigningTaskId && onAssign && (
+          <div style={{
+            position: 'absolute', zIndex: 100,
+            background: 'white', borderRadius: 10,
+            border: '1.5px solid rgba(90,83,225,0.15)',
+            boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+            marginTop: 4, minWidth: 140, overflow: 'hidden',
+          }}>
+            {teamMembers.map(m => (
+              <button
+                key={m.user_id}
+                onClick={() => { onAssign(task.id, m.user_id); setAssigningTaskId(null) }}
+                style={{
+                  display: 'block', width: '100%', padding: '7px 12px',
+                  border: 'none', background: 'none', textAlign: 'left',
+                  fontSize: 12, color: '#1a1730', cursor: 'pointer',
+                  fontFamily: 'inherit',
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(90,83,225,0.06)' }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none' }}
+              >
+                {m.name}
+              </button>
+            ))}
+            <button
+              onClick={() => setAssigningTaskId(null)}
+              style={{
+                display: 'block', width: '100%', padding: '5px 12px',
+                border: 'none', borderTop: '1px solid rgba(90,83,225,0.08)',
+                background: 'none', textAlign: 'left',
+                fontSize: 11, color: '#9B97CC', cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+            >
+              Cancel
+            </button>
+          </div>
         )}
       </div>
 
@@ -118,6 +182,24 @@ export default function TaskChip({ task, onDone, compact }: Props) {
           {dl.label}
         </span>
       )}
+
+      {/* Assign button (only for unassigned own tasks when team members exist) */}
+      {!isDone && teamMembers && teamMembers.length > 0 && currentUserId &&
+       task.owner_id === currentUserId && task.assignee_id === currentUserId &&
+       setAssigningTaskId && (
+        <button
+          onClick={() => setAssigningTaskId(assigningTaskId === task.id ? null : task.id)}
+          style={{
+            padding: '2px 7px', borderRadius: 20, border: 'none',
+            background: 'rgba(90,83,225,0.08)', color: '#5A53E1',
+            fontSize: 10, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap',
+            fontFamily: 'inherit',
+          }}
+        >
+          Assign
+        </button>
+      )}
     </motion.div>
+    </div>
   )
 }

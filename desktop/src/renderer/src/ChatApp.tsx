@@ -171,12 +171,14 @@ export default function ChatApp() {
   const { messages, tasks, isLoading, backendUrl, addMessage, setTasks, updateTaskStatus, setLoading, setBackendUrl } =
     useChatStore()
   const [input, setInput] = useState('')
-  const [activeTab, setActiveTab] = useState<'chat' | 'tasks'>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'settings'>('chat')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const greetingShown = useRef(false)
   const [userId, setUserId] = useState(() => localStorage.getItem('flaxie_user_id') || '')
   const [userName, setUserName] = useState(() => localStorage.getItem('flaxie_user_name') || '')
+  const [teamMembers, setTeamMembers] = useState<{user_id: string, name: string}[]>([])
+  const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null)
   const isOnboarding = !userId
 
   // Init backend URL + tell main process the real user ID for WebSocket
@@ -220,6 +222,37 @@ export default function ChatApp() {
         })
       })
   }, [userId, backendUrl]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load team members for assignment UI
+  useEffect(() => {
+    if (!backendUrl || !userId) return
+    const teamId = localStorage.getItem('flaxie_team_id')
+    if (!teamId) return
+    fetch(`${backendUrl}/api/team/overview?team_id=${teamId}`)
+      .then(r => r.json())
+      .then(d => setTeamMembers((d.members || []).filter((m: any) => m.user_id !== userId)))
+      .catch(() => {})
+  }, [backendUrl, userId]) // eslint-disable-line
+
+  // Auto-send nudge context from notification button clicks
+  useEffect(() => {
+    const ctx = localStorage.getItem('flaxie_nudge_context')
+    if (!ctx || !backendUrl || !userId || isLoading) return
+    localStorage.removeItem('flaxie_nudge_context')
+    const send = async () => {
+      addMessage({ id: `nudge_ctx_${Date.now()}`, role: 'user', content: ctx, timestamp: new Date() })
+      setLoading(true)
+      try {
+        const res = await fetch(`${backendUrl}/api/chat`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: ctx, user_id: userId, user_name: userName, history: [] }),
+        })
+        const data = await res.json()
+        addMessage({ id: `nudge_reply_${Date.now()}`, role: 'assistant', content: data.reply, timestamp: new Date() })
+      } catch {} finally { setLoading(false) }
+    }
+    setTimeout(send, 1200) // after greeting appears
+  }, [backendUrl, userId]) // eslint-disable-line
 
   // Auto-scroll
   useEffect(() => {
@@ -292,6 +325,17 @@ export default function ChatApp() {
     } catch {}
   }
 
+  async function assignTask(taskId: string, assigneeId: string) {
+    try {
+      await fetch(`${backendUrl}/api/tasks/${taskId}/assign`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ assignee_id: assigneeId, owner_id: userId }),
+      })
+      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      setTasks(await tr.json())
+    } catch {}
+  }
+
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() }
   }
@@ -303,6 +347,12 @@ export default function ChatApp() {
     const h = (new Date(t.deadline).getTime() - Date.now()) / 3600000
     return h < 24
   })
+
+  // Team task groups
+  const assignedToMeTasks = openTasks.filter(t => t.assignee_id === userId && t.owner_id !== userId)
+  const myOwnTasks = openTasks.filter(t => t.owner_id === userId && t.assignee_id === userId)
+  const watchingTasks = openTasks.filter(t => t.owner_id === userId && t.assignee_id !== userId)
+  const hasTeamTasks = assignedToMeTasks.length > 0 || watchingTasks.length > 0
 
   if (isOnboarding) {
     return (
@@ -374,7 +424,7 @@ export default function ChatApp() {
         borderBottom: '1px solid rgba(90,83,225,0.08)',
         padding: '0 14px',
       }}>
-        {(['chat', 'tasks'] as const).map(tab => (
+        {(['chat', 'tasks', 'settings'] as const).map(tab => (
           <button key={tab} onClick={() => setActiveTab(tab)} style={{
             padding: '8px 14px 9px', fontSize: 12, fontWeight: 600,
             cursor: 'pointer', border: 'none', background: 'none',
@@ -419,6 +469,29 @@ export default function ChatApp() {
             </motion.div>
           )}
 
+          {/* Settings tab */}
+          {activeTab === 'settings' && (
+            <motion.div key="settings"
+              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+              style={{ flex: 1, overflowY: 'auto' }}
+            >
+              <SettingsPanel
+                userId={userId}
+                userName={userName}
+                backendUrl={backendUrl}
+                onSignOut={() => {
+                  localStorage.removeItem('flaxie_user_id')
+                  localStorage.removeItem('flaxie_user_name')
+                  window.location.reload()
+                }}
+                onTeamJoined={(tid, tname) => {
+                  localStorage.setItem('flaxie_team_id', tid)
+                  localStorage.setItem('flaxie_team_name', tname)
+                }}
+              />
+            </motion.div>
+          )}
+
           {/* Tasks tab */}
           {activeTab === 'tasks' && (
             <motion.div key="tasks"
@@ -432,12 +505,68 @@ export default function ChatApp() {
                     <div style={{ fontSize: 13 }}>No tasks yet</div>
                     <div style={{ fontSize: 11, marginTop: 4, color: '#C3BFF7' }}>Add one below or tell Flaxie in chat</div>
                   </div>
+                ) : hasTeamTasks ? (
+                  <>
+                    {assignedToMeTasks.length > 0 && (
+                      <div style={{ marginBottom: 14 }}>
+                        <SectionLabel color="#E67E22">Assigned to me · {assignedToMeTasks.length}</SectionLabel>
+                        {assignedToMeTasks.map(t => (
+                          <TaskChip key={t.id} task={t} onDone={markTaskDone}
+                            currentUserId={userId}
+                            teamMembers={teamMembers}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {myOwnTasks.length > 0 && (
+                      <div style={{ marginBottom: 14 }}>
+                        <SectionLabel color="#5A53E1">Open · {myOwnTasks.length}</SectionLabel>
+                        {myOwnTasks.map(t => (
+                          <TaskChip key={t.id} task={t} onDone={markTaskDone}
+                            currentUserId={userId}
+                            teamMembers={teamMembers}
+                            onAssign={assignTask}
+                            assigningTaskId={assigningTaskId}
+                            setAssigningTaskId={setAssigningTaskId}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {watchingTasks.length > 0 && (
+                      <div style={{ marginBottom: 14 }}>
+                        <SectionLabel color="#A29BFE">I'm watching · {watchingTasks.length}</SectionLabel>
+                        {watchingTasks.map(t => (
+                          <TaskChip key={t.id} task={t}
+                            currentUserId={userId}
+                            teamMembers={teamMembers}
+                            onAssign={assignTask}
+                            assigningTaskId={assigningTaskId}
+                            setAssigningTaskId={setAssigningTaskId}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {doneTasks.length > 0 && (
+                      <div>
+                        <SectionLabel color="#9B97CC">Done · {doneTasks.length}</SectionLabel>
+                        {doneTasks.slice(0, 5).map(t => <TaskChip key={t.id} task={t} currentUserId={userId} />)}
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <>
                     {urgentTasks.length > 0 && (
                       <div style={{ marginBottom: 14 }}>
                         <SectionLabel color="#E67E22">Urgent · {urgentTasks.length}</SectionLabel>
-                        {urgentTasks.map(t => <TaskChip key={t.id} task={t} onDone={markTaskDone} />)}
+                        {urgentTasks.map(t => (
+                          <TaskChip key={t.id} task={t} onDone={markTaskDone}
+                            currentUserId={userId}
+                            teamMembers={teamMembers}
+                            onAssign={assignTask}
+                            assigningTaskId={assigningTaskId}
+                            setAssigningTaskId={setAssigningTaskId}
+                          />
+                        ))}
                       </div>
                     )}
                     {openTasks.filter(t => !urgentTasks.includes(t)).length > 0 && (
@@ -445,15 +574,21 @@ export default function ChatApp() {
                         <SectionLabel color="#5A53E1">
                           Open · {openTasks.filter(t => !urgentTasks.includes(t)).length}
                         </SectionLabel>
-                        {openTasks.filter(t => !urgentTasks.includes(t)).map(t =>
-                          <TaskChip key={t.id} task={t} onDone={markTaskDone} />
-                        )}
+                        {openTasks.filter(t => !urgentTasks.includes(t)).map(t => (
+                          <TaskChip key={t.id} task={t} onDone={markTaskDone}
+                            currentUserId={userId}
+                            teamMembers={teamMembers}
+                            onAssign={assignTask}
+                            assigningTaskId={assigningTaskId}
+                            setAssigningTaskId={setAssigningTaskId}
+                          />
+                        ))}
                       </div>
                     )}
                     {doneTasks.length > 0 && (
                       <div>
                         <SectionLabel color="#9B97CC">Done · {doneTasks.length}</SectionLabel>
-                        {doneTasks.slice(0, 5).map(t => <TaskChip key={t.id} task={t} />)}
+                        {doneTasks.slice(0, 5).map(t => <TaskChip key={t.id} task={t} currentUserId={userId} />)}
                       </div>
                     )}
                   </>
@@ -508,6 +643,277 @@ export default function ChatApp() {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Settings Panel ────────────────────────────────────────────────────────────
+
+interface SettingsPanelProps {
+  userId: string
+  userName: string
+  backendUrl: string
+  onSignOut: () => void
+  onTeamJoined: (teamId: string, teamName: string) => void
+}
+
+function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }: SettingsPanelProps) {
+  const [profile, setProfile] = useState<{ name: string; email: string; team_id?: string; team_name?: string } | null>(null)
+  const [teamMembers, setTeamMembers] = useState<{ user_id: string; name: string; open_tasks: number }[]>([])
+  const [inviteCode, setInviteCode] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [view, setView] = useState<'idle' | 'create' | 'join'>('idle')
+  const [inputVal, setInputVal] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!backendUrl || !userId) return
+    fetch(`${backendUrl}/api/auth/me?user_id=${userId}`)
+      .then(r => r.json())
+      .then(data => {
+        setProfile(data)
+        if (data.team_id) loadTeam(data.team_id)
+      })
+      .catch(() => {})
+  }, [backendUrl, userId]) // eslint-disable-line
+
+  async function loadTeam(teamId: string) {
+    try {
+      const [overviewRes, inviteRes] = await Promise.all([
+        fetch(`${backendUrl}/api/team/overview?team_id=${teamId}`),
+        fetch(`${backendUrl}/api/team/generate-invite?team_id=${teamId}`),
+      ])
+      const overview = await overviewRes.json()
+      const invite = await inviteRes.json()
+      setTeamMembers(overview.members || [])
+      setInviteCode(invite.invite_code || '')
+    } catch {}
+  }
+
+  async function createTeam() {
+    if (!inputVal.trim()) return
+    setBusy(true); setError('')
+    try {
+      const res = await fetch(`${backendUrl}/api/team/create`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: inputVal.trim(), user_id: userId }),
+      })
+      const data = await res.json()
+      setProfile(p => p ? { ...p, team_id: data.team_id, team_name: data.team_name } : p)
+      setInviteCode(data.invite_code)
+      onTeamJoined(data.team_id, data.team_name)
+      await loadTeam(data.team_id)
+      setView('idle'); setInputVal('')
+    } catch { setError('Failed to create team') }
+    finally { setBusy(false) }
+  }
+
+  async function joinTeam() {
+    if (!inputVal.trim()) return
+    setBusy(true); setError('')
+    try {
+      const res = await fetch(`${backendUrl}/api/team/join`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invite_code: inputVal.trim().toUpperCase(), user_id: userId }),
+      })
+      if (!res.ok) { setError('Invalid invite code'); setBusy(false); return }
+      const data = await res.json()
+      setProfile(p => p ? { ...p, team_id: data.team_id, team_name: data.team_name } : p)
+      onTeamJoined(data.team_id, data.team_name)
+      await loadTeam(data.team_id)
+      setView('idle'); setInputVal('')
+    } catch { setError('Failed to join team') }
+    finally { setBusy(false) }
+  }
+
+  function copyInvite() {
+    navigator.clipboard.writeText(inviteCode)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  const initials = (profile?.name || userName || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()
+
+  const sectionStyle: React.CSSProperties = {
+    padding: '14px 16px',
+    borderBottom: '1px solid rgba(90,83,225,0.07)',
+  }
+  const labelStyle: React.CSSProperties = {
+    fontSize: 10, fontWeight: 700, color: '#9B97CC',
+    letterSpacing: '0.08em', textTransform: 'uppercase',
+    marginBottom: 10, fontFamily: 'IBM Plex Mono, monospace',
+  }
+
+  return (
+    <div style={{ paddingBottom: 16 }}>
+
+      {/* Profile */}
+      <div style={sectionStyle}>
+        <div style={labelStyle}>Profile</div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <div style={{
+            width: 44, height: 44, borderRadius: 14,
+            background: 'linear-gradient(135deg, #4A42D8, #6B63E8)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 16, fontWeight: 700, color: 'white', flexShrink: 0,
+          }}>
+            {initials}
+          </div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: '#1a1730' }}>
+              {profile?.name || userName}
+            </div>
+            <div style={{ fontSize: 12, color: '#9B97CC', marginTop: 2 }}>
+              {profile?.email || 'Loading...'}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Team */}
+      <div style={sectionStyle}>
+        <div style={labelStyle}>Team</div>
+
+        {profile?.team_id ? (
+          <>
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              marginBottom: 10,
+            }}>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#1a1730' }}>
+                  {profile.team_name}
+                </div>
+                <div style={{ fontSize: 11, color: '#9B97CC', marginTop: 2 }}>
+                  {teamMembers.length} member{teamMembers.length !== 1 ? 's' : ''}
+                </div>
+              </div>
+            </div>
+
+            {/* Invite code */}
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              background: 'rgba(90,83,225,0.05)', borderRadius: 10,
+              padding: '8px 12px', marginBottom: 12,
+            }}>
+              <span style={{ fontSize: 11, color: '#9B97CC', flex: 1 }}>Invite code</span>
+              <span style={{
+                fontFamily: 'IBM Plex Mono, monospace', fontSize: 13,
+                fontWeight: 700, color: '#5A53E1', letterSpacing: '0.1em',
+              }}>
+                {inviteCode || '——'}
+              </span>
+              <button onClick={copyInvite} style={{
+                padding: '3px 9px', borderRadius: 7, border: 'none',
+                background: copied ? '#2ED573' : '#5A53E1',
+                color: 'white', fontSize: 10, fontWeight: 600, cursor: 'pointer',
+                transition: 'background 0.2s',
+              }}>
+                {copied ? 'Copied!' : 'Copy'}
+              </button>
+            </div>
+
+            {/* Members */}
+            {teamMembers.map(m => (
+              <div key={m.user_id} style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '6px 0', borderBottom: '1px solid rgba(90,83,225,0.05)',
+              }}>
+                <div style={{
+                  width: 28, height: 28, borderRadius: 9,
+                  background: 'linear-gradient(135deg, #A29BFE, #6B63E8)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: 10, fontWeight: 700, color: 'white', flexShrink: 0,
+                }}>
+                  {m.name.split(' ').map((w: string) => w[0]).join('').slice(0, 2).toUpperCase()}
+                </div>
+                <span style={{ fontSize: 12, color: '#1a1730', flex: 1 }}>{m.name}</span>
+                <span style={{ fontSize: 11, color: '#9B97CC' }}>
+                  {m.open_tasks} task{m.open_tasks !== 1 ? 's' : ''}
+                </span>
+              </div>
+            ))}
+          </>
+        ) : (
+          <>
+            {view === 'idle' && (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button onClick={() => setView('create')} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 10, border: 'none',
+                  background: 'linear-gradient(135deg, #5A53E1, #7B75F0)',
+                  color: 'white', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}>
+                  Create team
+                </button>
+                <button onClick={() => setView('join')} style={{
+                  flex: 1, padding: '8px 0', borderRadius: 10,
+                  border: '1.5px solid rgba(90,83,225,0.2)', background: 'none',
+                  color: '#5A53E1', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                }}>
+                  Join with code
+                </button>
+              </div>
+            )}
+            {(view === 'create' || view === 'join') && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <input
+                  autoFocus
+                  value={inputVal}
+                  onChange={e => { setInputVal(e.target.value); setError('') }}
+                  onKeyDown={e => e.key === 'Enter' && (view === 'create' ? createTeam() : joinTeam())}
+                  placeholder={view === 'create' ? 'Team name...' : 'Invite code (e.g. AB12CD34)'}
+                  style={{
+                    padding: '9px 12px', borderRadius: 10, fontSize: 13,
+                    border: `1.5px solid ${error ? '#FF4757' : 'rgba(90,83,225,0.2)'}`,
+                    outline: 'none', background: 'white', color: '#1a1730',
+                    fontFamily: 'inherit',
+                  }}
+                />
+                {error && <div style={{ fontSize: 11, color: '#FF4757' }}>{error}</div>}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button
+                    onClick={view === 'create' ? createTeam : joinTeam}
+                    disabled={busy}
+                    style={{
+                      flex: 1, padding: '8px 0', borderRadius: 10, border: 'none',
+                      background: 'linear-gradient(135deg, #5A53E1, #7B75F0)',
+                      color: 'white', fontSize: 12, fontWeight: 600,
+                      cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.7 : 1,
+                    }}
+                  >
+                    {busy ? '...' : view === 'create' ? 'Create' : 'Join'}
+                  </button>
+                  <button onClick={() => { setView('idle'); setInputVal(''); setError('') }} style={{
+                    padding: '8px 14px', borderRadius: 10,
+                    border: '1.5px solid rgba(90,83,225,0.15)', background: 'none',
+                    color: '#9B97CC', fontSize: 12, cursor: 'pointer',
+                  }}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Sign out */}
+      <div style={{ padding: '14px 16px' }}>
+        <button
+          onClick={onSignOut}
+          style={{
+            width: '100%', padding: '9px 0', borderRadius: 10,
+            border: '1.5px solid rgba(255,71,87,0.25)', background: 'rgba(255,71,87,0.04)',
+            color: '#FF4757', fontSize: 12, fontWeight: 600, cursor: 'pointer',
+            transition: 'all 0.15s',
+          }}
+          onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,71,87,0.09)' }}
+          onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'rgba(255,71,87,0.04)' }}
+        >
+          Sign out
+        </button>
+      </div>
     </div>
   )
 }

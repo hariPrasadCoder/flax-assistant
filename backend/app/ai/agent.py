@@ -189,6 +189,18 @@ Decision rules (these are guidelines, not code — you reason about them):
 - If there are no active tasks, go dormant and check back in 90 minutes
 
 Always call set_mascot_state to close out every cycle.
+
+ACTION LABEL CONVENTIONS (the label you write determines what happens when clicked):
+- To let them mark a task done: "Done!" or "I'm done!" or "Marking it done"
+- To flag they need help: "Need help" or "I'm blocked"
+- To open a chat conversation: "Let's talk" or "Chat with Flaxie"
+- To snooze and check back later: "Snooze 1h" or "Remind me in 2h"
+- For owner to ping their assignee: "Remind them" or "Ping her" or "Nudge them"
+- Everything else is a simple acknowledgment
+
+For team tasks (owned by you, assigned to others): generate owner-perspective nudges
+like "Priya hasn't updated 'Design mockup' in 4h — it's due tomorrow" with actions
+["Got it", "Remind them", "Extend deadline"].
 """
 
 
@@ -260,6 +272,48 @@ def build_context_message(context: dict) -> str:
         lines.append("ACTIVE TASKS: none")
 
     lines.append("")
+
+    owned_tasks = context.get("owned_tasks", [])
+    if owned_tasks:
+        lines.append("TASKS ASSIGNED TO YOUR TEAM (you own, they're working):")
+        for t in owned_tasks:
+            dl = ""
+            urgency_tag = ""
+            if t.get("deadline"):
+                try:
+                    deadline_dt = datetime.fromisoformat(
+                        t["deadline"].replace("Z", "").replace("+00:00", "")
+                    ).replace(tzinfo=timezone.utc)
+                    hours_left = (deadline_dt - now).total_seconds() / 3600
+                    if hours_left < 0:
+                        dl = f"OVERDUE {abs(int(hours_left))}h ago"
+                        urgency_tag = " [CRITICAL]"
+                    elif hours_left < 24:
+                        dl = f"due in {int(hours_left)}h"
+                        urgency_tag = " [TODAY]"
+                    else:
+                        dl = f"due in {int(hours_left / 24)}d"
+                except Exception:
+                    dl = t["deadline"]
+
+            last_nudged = ""
+            if t.get("last_nudged_at"):
+                try:
+                    ln_dt = datetime.fromisoformat(
+                        t["last_nudged_at"].replace("Z", "").replace("+00:00", "")
+                    ).replace(tzinfo=timezone.utc)
+                    mins_ago = int((now - ln_dt).total_seconds() / 60)
+                    last_nudged = f" | last nudged {mins_ago}min ago"
+                except Exception:
+                    pass
+
+            assignee = t.get("assignee", "unknown")
+            lines.append(
+                f"  [{t['id']}]{urgency_tag} \"{t['title']}\" | assigned to: {assignee}"
+                f" | {t['status'].upper()} | {dl}"
+                f" | nudged {t.get('nudge_count', 0)}x{last_nudged}"
+            )
+        lines.append("")
 
     memories = context.get("memories", [])
     if memories:
@@ -403,6 +457,7 @@ async def run_agent(
     learnings: List[dict],
     recent_nudges: List[dict],
     user_name: Optional[str] = None,
+    owned_tasks: Optional[List[dict]] = None,
 ) -> dict:
     """
     Run Flaxie's autonomous agent cycle.
@@ -418,6 +473,7 @@ async def run_agent(
             "learnings": learnings,
             "recent_nudges": recent_nudges,
             "user_name": user_name,
+            "owned_tasks": owned_tasks or [],
         },
         "actions_taken": [],
         "mascot_state": "idle",

@@ -20,7 +20,7 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import select
 
 from .database import AsyncSessionLocal
-from .models import Task, TaskStatus, NudgeLog, MemoryType
+from .models import Task, TaskStatus, NudgeLog, MemoryType, User
 from .ai.agent import run_agent
 from .ai.memory import get_recent_memories, get_learnings, save_memory
 from .websocket_manager import ws_manager
@@ -56,6 +56,30 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
             for t in result.scalars().all()
         ]
 
+        # Tasks this user OWNS that are assigned to someone else
+        owned_result = await db.execute(
+            select(Task, User)
+            .join(User, Task.assignee_id == User.id)
+            .where(
+                Task.owner_id == user_id,
+                Task.assignee_id != user_id,
+                Task.status != TaskStatus.done
+            )
+            .order_by(Task.deadline.asc().nullslast())
+        )
+        owned_tasks = [
+            {
+                "id": t.id, "title": t.title, "status": t.status.value,
+                "deadline": t.deadline.isoformat() if t.deadline else None,
+                "created_at": t.created_at.isoformat(),
+                "nudge_count": t.nudge_count,
+                "last_nudged_at": t.last_nudged_at.isoformat() if t.last_nudged_at else None,
+                "assignee": u.name,  # who's doing the work
+                "assignee_id": t.assignee_id,
+            }
+            for t, u in owned_result.all()
+        ]
+
         # Load recent nudges (24h)
         nudge_result = await db.execute(
             select(NudgeLog)
@@ -84,6 +108,7 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
             learnings=learnings,
             recent_nudges=recent_nudges,
             user_name=user_name,
+            owned_tasks=owned_tasks,
         )
 
         mascot_state = result.get("mascot_state", "idle")
