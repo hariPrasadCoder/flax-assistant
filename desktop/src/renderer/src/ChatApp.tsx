@@ -226,7 +226,7 @@ export default function ChatApp() {
   const { messages, tasks, isLoading, backendUrl, addMessage, setTasks, updateTaskStatus, setLoading, setBackendUrl } =
     useChatStore()
   const [input, setInput] = useState('')
-  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'history' | 'settings'>('chat')
+  const [activeTab, setActiveTab] = useState<'chat' | 'tasks' | 'settings'>('chat')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const greetingShown = useRef(false)
@@ -234,8 +234,6 @@ export default function ChatApp() {
   const [userName, setUserName] = useState(() => localStorage.getItem('flaxie_user_name') || '')
   const [teamMembers, setTeamMembers] = useState<{user_id: string, name: string}[]>([])
   const [assigningTaskId, setAssigningTaskId] = useState<string | null>(null)
-  const [nudgeHistory, setNudgeHistory] = useState<NudgeHistoryItem[]>([])
-  const [historyLoaded, setHistoryLoaded] = useState(false)
   const isOnboarding = !userId
 
   // Init backend URL + tell main process the real user ID for WebSocket
@@ -301,15 +299,8 @@ export default function ChatApp() {
     loadHistoryOrGreet()
   }, [userId, backendUrl]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load nudge history every time history tab is activated
-  useEffect(() => {
-    if (activeTab !== 'history' || !backendUrl || !userId) return
-    setHistoryLoaded(false)
-    fetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=30`)
-      .then(r => r.json())
-      .then(data => { setNudgeHistory(Array.isArray(data) ? data : []); setHistoryLoaded(true) })
-      .catch(() => { setNudgeHistory([]); setHistoryLoaded(true) })
-  }, [activeTab, backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Load nudge history when settings tab is active and user expands history
+  // (triggered from SettingsPanel via callback — state lives there now)
 
   // Load team members for assignment UI
   useEffect(() => {
@@ -579,36 +570,25 @@ export default function ChatApp() {
         borderBottom: '1px solid rgba(90,83,225,0.08)',
         padding: '0 14px',
       }}>
-        {(['chat', 'tasks', 'history', 'settings'] as const).map(tab => {
-          const unreadNudges = nudgeHistory.filter(n => !n.user_response && !n.dismissed).length
-          return (
-            <button key={tab} onClick={() => setActiveTab(tab)} style={{
-              padding: '8px 14px 9px', fontSize: 12, fontWeight: 600,
-              cursor: 'pointer', border: 'none', background: 'none',
-              color: activeTab === tab ? '#5A53E1' : '#9B97CC',
-              borderBottom: activeTab === tab ? '2px solid #5A53E1' : '2px solid transparent',
-              transition: 'all 0.15s', textTransform: 'capitalize', letterSpacing: '0.01em',
-            }}>
-              {tab}
-              {tab === 'tasks' && openTasks.length > 0 && (
-                <span style={{
-                  marginLeft: 5, background: '#5A53E1', color: 'white',
-                  borderRadius: 10, fontSize: 9, padding: '1px 5px', fontWeight: 700,
-                }}>
-                  {openTasks.length}
-                </span>
-              )}
-              {tab === 'history' && unreadNudges > 0 && (
-                <span style={{
-                  marginLeft: 5, background: '#E67E22', color: 'white',
-                  borderRadius: 10, fontSize: 9, padding: '1px 5px', fontWeight: 700,
-                }}>
-                  {unreadNudges}
-                </span>
-              )}
-            </button>
-          )
-        })}
+        {(['chat', 'tasks', 'settings'] as const).map(tab => (
+          <button key={tab} onClick={() => setActiveTab(tab)} style={{
+            padding: '8px 14px 9px', fontSize: 12, fontWeight: 600,
+            cursor: 'pointer', border: 'none', background: 'none',
+            color: activeTab === tab ? '#5A53E1' : '#9B97CC',
+            borderBottom: activeTab === tab ? '2px solid #5A53E1' : '2px solid transparent',
+            transition: 'all 0.15s', textTransform: 'capitalize', letterSpacing: '0.01em',
+          }}>
+            {tab}
+            {tab === 'tasks' && openTasks.length > 0 && (
+              <span style={{
+                marginLeft: 5, background: '#5A53E1', color: 'white',
+                borderRadius: 10, fontSize: 9, padding: '1px 5px', fontWeight: 700,
+              }}>
+                {openTasks.length}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
 
       {/* ── Content ── */}
@@ -774,122 +754,6 @@ export default function ChatApp() {
             </motion.div>
           )}
 
-          {/* History tab */}
-          {activeTab === 'history' && (
-            <motion.div key="history"
-              initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
-              style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}
-            >
-              {/* Nudge history section */}
-              <div style={{
-                fontSize: 10, fontWeight: 700, color: '#9B97CC', letterSpacing: '0.08em',
-                textTransform: 'uppercase', marginBottom: 8,
-                fontFamily: 'IBM Plex Mono, monospace',
-              }}>
-                Nudge history
-              </div>
-              {!historyLoaded ? (
-                <div style={{ textAlign: 'center', color: '#C3BFF7', marginTop: 16, marginBottom: 16, fontSize: 12 }}>
-                  Loading...
-                </div>
-              ) : nudgeHistory.length === 0 ? (
-                <div style={{
-                  textAlign: 'center', color: '#C3BFF7', marginBottom: 16,
-                  background: 'white', borderRadius: 12, padding: '16px',
-                  border: '1px solid rgba(90,83,225,0.08)', fontSize: 12,
-                }}>
-                  No nudges yet — Flaxie will check in once you have tasks
-                </div>
-              ) : (
-                nudgeHistory.map(n => (
-                  <div key={n.id} style={{
-                    background: 'white', borderRadius: 12, padding: '10px 12px',
-                    border: '1px solid rgba(90,83,225,0.1)',
-                    marginBottom: 6,
-                  }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
-                      <div style={{
-                        width: 18, height: 18, borderRadius: '50%', flexShrink: 0,
-                        background: 'linear-gradient(135deg, #4A42D8, #6B63E8)',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                        marginTop: 1,
-                      }}>
-                        <svg width="10" height="10" viewBox="0 0 100 100" fill="none">
-                          <g fill="none" stroke="white" strokeWidth="4">
-                            {[0, 72, 144, 216, 288].map((r, i) => (
-                              <ellipse key={i} cx="50" cy="28" rx="10" ry="16" transform={`rotate(${r}, 50, 50)`} />
-                            ))}
-                          </g>
-                          <circle cx="50" cy="50" r="8" fill="white" />
-                        </svg>
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13, color: '#1a1730', lineHeight: 1.4 }}>
-                          {n.message}
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: 11, color: '#9B97CC' }}>
-                            {relativeTime(n.sent_at)}
-                          </span>
-                          {n.user_response && (
-                            <span style={{
-                              fontSize: 10, fontWeight: 600,
-                              background: 'rgba(90,83,225,0.1)', color: '#5A53E1',
-                              borderRadius: 20, padding: '2px 8px',
-                            }}>
-                              {n.user_response}
-                            </span>
-                          )}
-                          {n.dismissed && !n.user_response && (
-                            <span style={{
-                              fontSize: 10, color: '#9B97CC',
-                              background: 'rgba(155,151,204,0.1)',
-                              borderRadius: 20, padding: '2px 8px',
-                            }}>
-                              dismissed
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))
-              )}
-
-              {/* Chat log section */}
-              {messages.length > 0 && (
-                <>
-                  <div style={{
-                    fontSize: 10, fontWeight: 700, color: '#9B97CC', letterSpacing: '0.08em',
-                    textTransform: 'uppercase', margin: '14px 0 8px',
-                    fontFamily: 'IBM Plex Mono, monospace',
-                  }}>
-                    Chat log
-                  </div>
-                  {messages.slice(-20).map(m => (
-                    <div key={m.id} style={{
-                      background: 'white', borderRadius: 10, padding: '8px 11px',
-                      border: '1px solid rgba(90,83,225,0.08)', marginBottom: 4,
-                      display: 'flex', gap: 8, alignItems: 'flex-start',
-                    }}>
-                      <span style={{
-                        fontSize: 10, fontWeight: 700, flexShrink: 0, marginTop: 2,
-                        color: m.role === 'assistant' ? '#5A53E1' : '#9B97CC',
-                        textTransform: 'uppercase', letterSpacing: '0.05em',
-                        fontFamily: 'IBM Plex Mono, monospace',
-                      }}>
-                        {m.role === 'assistant' ? 'Flaxie' : 'You'}
-                      </span>
-                      <span style={{ fontSize: 12, color: '#1a1730', lineHeight: 1.45, flex: 1, minWidth: 0 }}>
-                        {m.content.length > 120 ? m.content.slice(0, 120) + '…' : m.content}
-                      </span>
-                    </div>
-                  ))}
-                </>
-              )}
-            </motion.div>
-          )}
-
         </AnimatePresence>
       </div>
 
@@ -968,6 +832,10 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
   // Calendar
   const [calendarConnected, setCalendarConnected] = useState(false)
   const [calendarEvents, setCalendarEvents] = useState<{ title: string; start: string; end: string }[]>([])
+  // Activity history
+  const [showHistory, setShowHistory] = useState(false)
+  const [nudgeHistory, setNudgeHistory] = useState<NudgeHistoryItem[]>([])
+  const [historyLoaded, setHistoryLoaded] = useState(false)
 
   useEffect(() => {
     if (!backendUrl || !userId) return
@@ -998,6 +866,15 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
       })
       .catch(() => {})
   }, [backendUrl, userId]) // eslint-disable-line
+
+  useEffect(() => {
+    if (!showHistory || !backendUrl || !userId) return
+    setHistoryLoaded(false)
+    fetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=30`)
+      .then(r => r.json())
+      .then(data => { setNudgeHistory(Array.isArray(data) ? data : []); setHistoryLoaded(true) })
+      .catch(() => { setNudgeHistory([]); setHistoryLoaded(true) })
+  }, [showHistory, backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function setFocus(minutes: number) {
     await fetch(`${backendUrl}/api/auth/focus`, {
@@ -1351,6 +1228,59 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
               Connect Google Calendar ↗
             </button>
           </>
+        )}
+      </div>
+
+      {/* Activity History */}
+      <div style={sectionStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+          <div style={labelStyle}>Activity</div>
+          <button
+            onClick={() => setShowHistory(h => !h)}
+            style={{
+              fontSize: 11, color: '#9B97CC', background: 'none', border: 'none',
+              cursor: 'pointer', fontFamily: 'inherit', padding: 0,
+            }}
+          >
+            {showHistory ? 'hide' : 'show'}
+          </button>
+        </div>
+        {showHistory && (
+          <div style={{ maxHeight: 280, overflowY: 'auto' }}>
+            {!historyLoaded ? (
+              <div style={{ fontSize: 12, color: '#C3BFF7', textAlign: 'center', padding: '12px 0' }}>Loading...</div>
+            ) : nudgeHistory.length === 0 ? (
+              <div style={{ fontSize: 12, color: '#C3BFF7', textAlign: 'center', padding: '12px 0' }}>
+                No nudge history yet
+              </div>
+            ) : (
+              nudgeHistory.map(n => (
+                <div key={n.id} style={{
+                  padding: '8px 0', borderBottom: '1px solid rgba(90,83,225,0.06)',
+                  display: 'flex', gap: 8, alignItems: 'flex-start',
+                }}>
+                  <div style={{
+                    width: 6, height: 6, borderRadius: '50%', flexShrink: 0, marginTop: 5,
+                    background: n.user_response ? '#5A53E1' : '#C3BFF7',
+                  }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 12, color: '#1a1730', lineHeight: 1.4 }}>
+                      {n.message}
+                    </div>
+                    <div style={{ display: 'flex', gap: 6, marginTop: 3, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <span style={{ fontSize: 10, color: '#9B97CC' }}>{relativeTime(n.sent_at)}</span>
+                      {n.user_response && (
+                        <span style={{
+                          fontSize: 10, fontWeight: 600, color: '#5A53E1',
+                          background: 'rgba(90,83,225,0.08)', borderRadius: 10, padding: '1px 6px',
+                        }}>{n.user_response}</span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
         )}
       </div>
 
