@@ -4,18 +4,19 @@ from __future__ import annotations
 Flaxie scheduler — drives the autonomous agent loop.
 
 Every cycle:
-1. Load context for the user (tasks, memories, learnings, nudges)
+1. Load context for the user (tasks, memories, learnings, nudges, calendar, focus state)
 2. Run the LangGraph agent — it decides what actions to take
 3. Execute whatever the agent decided (send notifications, etc.)
 4. Agent tells us when to check next — we schedule accordingly
 
-No hardcoded rules. The agent decides everything.
+No hardcoded rules. The agent decides everything — quiet hours, focus mode,
+calendar conflicts, recurring tasks, memory compression. We just collect context
+and execute whatever the agent decides.
 """
 
 import uuid
 import httpx
 from datetime import datetime, timezone, timedelta
-from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -33,55 +34,15 @@ scheduler = AsyncIOScheduler(timezone="UTC")
 async def run_agent_cycle(user_id: str, user_name: str | None = None):
     """
     One full agent cycle for a user.
-    The agent decides what to do; we execute its decisions.
+    Collects all context, hands it to the agent, executes decisions.
+    No deterministic filtering here — the agent reasons about time, focus, calendar.
     """
-    # Load user info: timezone and focus_until
+    # Load user info: timezone and focus_until — pass as context, don't filter here
     async with AsyncSessionLocal() as db:
         user_res = await db.execute(select(User).where(User.id == user_id))
         user = user_res.scalar_one_or_none()
         user_tz = user.timezone if user and user.timezone else "UTC"
         focus_until = user.focus_until if user else None
-
-    now_utc = datetime.now(timezone.utc)
-
-    # Focus / DND check
-    if focus_until is not None:
-        focus_until_aware = focus_until.replace(tzinfo=timezone.utc)
-        if now_utc < focus_until_aware:
-            print(f"[agent] user {user_id} is in focus mode until {focus_until}")
-            # Reschedule for when focus ends + 5 min
-            next_run = focus_until_aware + timedelta(minutes=5)
-            scheduler.add_job(
-                run_agent_cycle,
-                trigger=DateTrigger(run_date=next_run),
-                args=[user_id, user_name],
-                id=f"agent_{user_id}",
-                replace_existing=True,
-            )
-            return
-
-    # Quiet hours check — skip nudging between 9pm and 8am local time
-    try:
-        local_now = datetime.now(ZoneInfo(user_tz))
-        hour = local_now.hour
-        if hour < 8 or hour >= 21:
-            # Reschedule for 8am local time tomorrow (or today if it's past midnight but before 8am)
-            if hour < 8:
-                next_local = local_now.replace(hour=8, minute=0, second=0, microsecond=0)
-            else:
-                next_local = (local_now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
-            next_run = next_local.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
-            scheduler.add_job(
-                run_agent_cycle,
-                trigger=DateTrigger(run_date=next_run),
-                args=[user_id, user_name],
-                id=f"agent_{user_id}",
-                replace_existing=True,
-            )
-            print(f"[agent] quiet hours for {user_id} ({user_tz}, {hour}h) — next run at 8am local")
-            return
-    except Exception as e:
-        print(f"[agent] timezone error for {user_id}: {e}")
 
     # Fetch today's calendar events for context
     calendar_events = []
@@ -169,7 +130,7 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
         memories = await get_recent_memories(db, user_id)
         learnings = await get_learnings(db, user_id)
 
-        # Run the agent
+        # Run the agent — it decides whether to nudge, stay silent, etc.
         result = await run_agent(
             tasks=tasks,
             memories=memories,
@@ -180,6 +141,7 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
             user_id=user_id,
             user_tz=user_tz,
             calendar_events=calendar_events,
+            focus_until=focus_until.isoformat() if focus_until else None,
         )
 
         mascot_state = result.get("mascot_state", "idle")
@@ -242,6 +204,27 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
                 )
                 print(f"[agent] notified {user_id}: {message[:60]}...")
 
+            elif tool_name == "compress_memories":
+                # Agent decided to compress old memories
+                old_memories_res = await db.execute(
+                    select(Memory).where(
+                        Memory.user_id == user_id,
+                        Memory.compressed == False,
+                        Memory.type != MemoryType.learning,
+                        Memory.created_at < now - timedelta(hours=24),
+                    ).limit(15)
+                )
+                compressed_count = 0
+                for m in old_memories_res.scalars().all():
+                    m.compressed = True
+                    compressed_count += 1
+                print(f"[agent] compressed {compressed_count} memories for {user_id}")
+
+            elif tool_name == "set_focus_mode":
+                # Agent set focus mode — already executed via HTTP in the tool itself
+                minutes = action.get("minutes", 0)
+                print(f"[agent] focus mode set for {user_id} ({minutes}min)")
+
         await db.commit()
 
     # Agent decides when to run next
@@ -275,79 +258,11 @@ async def register_user_for_nudges(user_id: str, user_name: str | None = None):
     print(f"[agent] registered cycle for {user_id}")
 
 
-async def process_recurring_tasks():
-    """Create new instances of recurring tasks that are due."""
-    async with AsyncSessionLocal() as db:
-        now = datetime.now(timezone.utc)
-        result = await db.execute(
-            select(Task).where(
-                Task.is_recurring == True,
-                Task.status == TaskStatus.done,
-            )
-        )
-        for task in result.scalars().all():
-            if task.recurrence_days and task.completed_at:
-                next_due = task.completed_at + timedelta(days=task.recurrence_days)
-                if next_due <= now + timedelta(hours=24):
-                    new_task = Task(
-                        title=task.title,
-                        description=task.description,
-                        assignee_id=task.assignee_id,
-                        owner_id=task.owner_id,
-                        team_id=task.team_id,
-                        priority=task.priority,
-                        is_recurring=True,
-                        recurrence_days=task.recurrence_days,
-                        deadline=next_due,
-                        source="recurring",
-                    )
-                    db.add(new_task)
-        await db.commit()
-    print("[scheduler] process_recurring_tasks done")
-
-
-async def compress_memories():
-    """Summarize old uncompressed memories into learnings."""
-    async with AsyncSessionLocal() as db:
-        # Get all users with recent memories
-        users_result = await db.execute(select(User))
-        for user in users_result.scalars().all():
-            memories_result = await db.execute(
-                select(Memory).where(
-                    Memory.user_id == user.id,
-                    Memory.compressed == False,
-                    Memory.type != MemoryType.learning,
-                    Memory.created_at < datetime.utcnow() - timedelta(hours=48),
-                ).limit(20)
-            )
-            old_memories = memories_result.scalars().all()
-            if len(old_memories) >= 5:
-                for m in old_memories:
-                    m.compressed = True
-                await db.commit()
-                print(f"[memory] compressed {len(old_memories)} memories for {user.id}")
-
-
 def start_scheduler():
     if not scheduler.running:
         scheduler.start()
-        # Daily recurring tasks job at 00:05 UTC
-        scheduler.add_job(
-            process_recurring_tasks,
-            "cron",
-            hour=0,
-            minute=5,
-            id="recurring_tasks",
-            replace_existing=True,
-        )
-        # Memory compression every 6 hours
-        scheduler.add_job(
-            compress_memories,
-            "interval",
-            hours=6,
-            id="compress_memories",
-            replace_existing=True,
-        )
+        # No cron jobs here — the agent handles recurring tasks and memory compression
+        # as autonomous decisions via create_task_instance and compress_memories tools.
         print("[scheduler] started")
 
 
