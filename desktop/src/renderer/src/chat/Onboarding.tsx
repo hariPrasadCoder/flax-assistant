@@ -118,45 +118,56 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
   }
 
   async function handleVerifyOtp() {
-    if (otp.length < 8 || !supabase) return
+    if (otp.length < 6 || !supabase) return
     setLoading(true)
     setError('')
+
+    // Step 1: Supabase OTP verification
+    let uid: string
+    let uemail: string
     try {
       const { data, error: err } = await supabase.auth.verifyOtp({
         email: email.trim().toLowerCase(),
         token: otp.trim(),
         type: 'email',
       })
-      if (err || !data.user) { setError(err?.message || 'Invalid code'); return }
+      if (err || !data.user) {
+        setError(err?.message || 'Invalid or expired code — try again')
+        setLoading(false)
+        return
+      }
+      uid = data.user.id
+      uemail = data.user.email || email.trim().toLowerCase()
+    } catch (e: any) {
+      setError(e?.message || 'Verification failed — check your connection')
+      setLoading(false)
+      return
+    }
 
-      const uid = data.user.id
-      const uemail = data.user.email || email.trim().toLowerCase()
-      setUserId(uid)
-      setUserEmail(uemail)
+    setUserId(uid)
+    setUserEmail(uemail)
+    window.flaxie.setUserId(uid)
+    localStorage.setItem('flaxie_user_id', uid)
+    localStorage.setItem('flaxie_user_email', uemail)
 
-      // Tell main process the real user ID so WebSocket reconnects correctly
-      window.flaxie.setUserId(uid)
-      localStorage.setItem('flaxie_user_id', uid)
-      localStorage.setItem('flaxie_user_email', uemail)
-
-      // Check if user already has a profile
+    // Step 2: Check backend profile (non-fatal — if backend unreachable, treat as new user)
+    try {
       const meRes = await fetch(`${backendUrl}/api/auth/me?user_id=${uid}`)
-      const me = await meRes.json()
-
-      if (me && me.name) {
-        // Returning user — restore their info and go straight to team step
-        localStorage.setItem('flaxie_user_name', me.name)
-        if (me.team_id) localStorage.setItem('flaxie_team_id', me.team_id)
-        onComplete(uid, me.name, me.team_id || null)
-      } else {
-        // New user — needs to set their name
-        setStep('name')
+      if (meRes.ok) {
+        const me = await meRes.json()
+        if (me && me.name) {
+          localStorage.setItem('flaxie_user_name', me.name)
+          if (me.team_id) localStorage.setItem('flaxie_team_id', me.team_id)
+          onComplete(uid, me.name, me.team_id || null)
+          return
+        }
       }
     } catch {
-      setError('Verification failed — try again')
-    } finally {
-      setLoading(false)
+      // Backend unreachable — continue to name setup
     }
+
+    setStep('name')
+    setLoading(false)
   }
 
   async function handleSetupProfile() {
@@ -354,7 +365,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
               style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
             >
               <p style={{ fontSize: 13, color: '#6b6890', marginBottom: 4 }}>
-                We'll send an 8-digit code to your email. No password required.
+                We'll send a 6-digit code to your email. No password required.
               </p>
               <input
                 style={inputStyle}
@@ -390,24 +401,24 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
               style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
             >
               <p style={{ fontSize: 13, color: '#6b6890', marginBottom: 4 }}>
-                Enter the 8-digit code from your email.
+                Enter the 6-digit code from your email.
               </p>
               <input
                 style={otpInputStyle}
-                placeholder="00000000"
+                placeholder="000000"
                 type="text"
                 inputMode="numeric"
-                maxLength={8}
+                maxLength={6}
                 value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                onKeyDown={(e) => e.key === 'Enter' && otp.length === 8 && handleVerifyOtp()}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                onKeyDown={(e) => e.key === 'Enter' && otp.length >= 6 && handleVerifyOtp()}
                 autoFocus
               />
               {error && <div style={{ fontSize: 12, color: '#e74c3c' }}>{error}</div>}
               <button
                 style={{ ...btnPrimary, marginTop: 4 }}
                 onClick={handleVerifyOtp}
-                disabled={loading || otp.length < 8}
+                disabled={loading || otp.length < 6}
               >
                 {loading ? 'Verifying...' : 'Verify →'}
               </button>
