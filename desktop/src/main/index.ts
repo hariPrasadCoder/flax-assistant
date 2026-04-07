@@ -39,7 +39,12 @@ const IS_MAC      = process.platform === 'darwin'
 
 function getTrayIconPath(state: 'idle' | 'alert' | 'urgent' = 'idle'): string {
   const base = state === 'urgent' ? 'trayIconUrgent' : state === 'alert' ? 'trayIconAlert' : 'trayIcon'
-  return join(__dirname, `../../resources/${base}.png`)
+  // In dev: resources/ is relative to project root via __dirname
+  // In packaged app: resources/ is in process.resourcesPath (outside the asar)
+  if (is.dev) {
+    return join(__dirname, `../../resources/${base}.png`)
+  }
+  return join(process.resourcesPath, 'resources', `${base}.png`)
 }
 
 function makeTrayIcon(state: 'idle' | 'alert' | 'urgent' = 'idle'): Electron.NativeImage {
