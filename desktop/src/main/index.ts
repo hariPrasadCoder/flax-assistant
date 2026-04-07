@@ -48,7 +48,11 @@ function getTrayIconPath(state: 'idle' | 'alert' | 'urgent' = 'idle'): string {
 }
 
 function makeTrayIcon(state: 'idle' | 'alert' | 'urgent' = 'idle'): Electron.NativeImage {
-  return nativeImage.createFromPath(getTrayIconPath(state))
+  const img = nativeImage.createFromPath(getTrayIconPath(state))
+  // Template image: macOS inverts black pixels to match menu bar (dark/light mode)
+  // Only for idle — alert/urgent use color tints
+  if (IS_MAC && state === 'idle') img.setTemplateImage(true)
+  return img
 }
 
 // ── Chat panel ────────────────────────────────────────────────────────────────
