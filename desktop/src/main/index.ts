@@ -48,9 +48,7 @@ function getTrayIconPath(state: 'idle' | 'alert' | 'urgent' = 'idle'): string {
 }
 
 function makeTrayIcon(state: 'idle' | 'alert' | 'urgent' = 'idle'): Electron.NativeImage {
-  const img = nativeImage.createFromPath(getTrayIconPath(state))
-  if (IS_MAC && state === 'idle') img.setTemplateImage(true)
-  return img
+  return nativeImage.createFromPath(getTrayIconPath(state))
 }
 
 // ── Chat panel ────────────────────────────────────────────────────────────────

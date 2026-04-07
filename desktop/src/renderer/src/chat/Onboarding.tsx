@@ -1,5 +1,6 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { useState, useEffect } from 'react'
+import { createClient } from '@supabase/supabase-js'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getSupabase } from '../lib/supabase'
 import { authFetch } from '../lib/api'
@@ -82,10 +83,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
     } else {
       // Fallback: try IPC (for builds where env vars weren't baked in)
       window.flaxie.getSupabaseConfig().then(({ url: u, anonKey: k }) => {
-        if (u && k) {
-          const { createClient } = require('@supabase/supabase-js')
-          setSupabase(createClient(u, k))
-        }
+        if (u && k) setSupabase(createClient(u, k))
       })
     }
   }, [])
