@@ -41,7 +41,7 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "flax-hq",
+        "owner": "hariPrasadCoder",
         "repo": "flax-assistant"
       }
     ],
