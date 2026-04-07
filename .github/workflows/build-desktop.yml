@@ -18,6 +18,8 @@ jobs:
   build-mac:
     name: Build macOS (arm64 + x64)
     runs-on: macos-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -71,6 +73,8 @@ jobs:
   build-windows:
     name: Build Windows (x64)
     runs-on: windows-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
