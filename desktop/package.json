@@ -38,6 +38,7 @@
   "build": {
     "appId": "com.flax.assistant",
     "productName": "Flaxie",
+    "afterPack": "./scripts/afterPack.js",
     "publish": [
       {
         "provider": "github",
