@@ -1,116 +1,86 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from pydantic import BaseModel, EmailStr, validator
+from fastapi import APIRouter, Depends, HTTPException
+from supabase import AsyncClient
+from pydantic import BaseModel, EmailStr
 from typing import Optional
-from passlib.context import CryptContext
-from jose import jwt
-import uuid
 
 from ..database import get_db
-from ..models import User, Team
-from ..config import settings
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-pwd_context = CryptContext(schemes=["sha256_crypt"], deprecated="auto")
 
-
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
-
-
-def create_token(user_id: str) -> str:
-    exp = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
-    return jwt.encode({"sub": user_id, "exp": exp}, settings.secret_key, algorithm=settings.algorithm)
-
-
-class RegisterRequest(BaseModel):
+class SetupRequest(BaseModel):
+    """Called once after OTP verification to create/update the user's profile."""
+    user_id: str       # Supabase Auth user.id
     name: str
     email: EmailStr
-    password: str
     timezone: Optional[str] = "UTC"
 
-    @validator('name')
-    def name_min_length(cls, v):
-        if len(v.strip()) < 1:
-            raise ValueError('Name cannot be empty')
-        return v.strip()
 
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
-
-
-class AuthResponse(BaseModel):
+class SetupResponse(BaseModel):
     user_id: str
     name: str
     email: str
     team_id: Optional[str]
     team_name: Optional[str]
-    token: str
 
 
-@router.post("/register", response_model=AuthResponse)
-async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    # Check email uniqueness
-    result = await db.execute(select(User).where(User.email == data.email))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="Email already registered")
+@router.post("/setup", response_model=SetupResponse)
+async def setup_user(data: SetupRequest, db: AsyncClient = Depends(get_db)):
+    """
+    Create or update the user profile row after successful OTP verification.
+    Idempotent — safe to call on every login (updating name / timezone).
+    """
+    if not data.name.strip():
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
 
-    user = User(
-        id=str(uuid.uuid4()),
-        name=data.name,
-        email=data.email,
-        hashed_password=hash_password(data.password),
-        timezone=data.timezone or "UTC",
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-
-    token = create_token(user.id)
-    return AuthResponse(
-        user_id=user.id,
-        name=user.name,
-        email=user.email,
-        team_id=None,
-        team_name=None,
-        token=token,
-    )
-
-
-@router.post("/login", response_model=AuthResponse)
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == data.email))
-    user = result.scalar_one_or_none()
-
-    if not user or not verify_password(data.password, user.hashed_password):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    user_dict = {
+        "id": data.user_id,
+        "name": data.name.strip(),
+        "email": data.email,
+        "timezone": data.timezone or "UTC",
+    }
+    res = await db.table("users").upsert(user_dict, on_conflict="id").execute()
+    user = res.data[0] if res.data else user_dict
 
     team_name = None
-    if user.team_id:
-        team_result = await db.execute(select(Team).where(Team.id == user.team_id))
-        team = team_result.scalar_one_or_none()
-        team_name = team.name if team else None
+    if user.get("team_id"):
+        team_res = await db.table("teams").select("name").eq("id", user["team_id"]).limit(1).execute()
+        if team_res.data:
+            team_name = team_res.data[0]["name"]
 
-    token = create_token(user.id)
-    return AuthResponse(
-        user_id=user.id,
-        name=user.name,
-        email=user.email,
-        team_id=user.team_id,
+    return SetupResponse(
+        user_id=user["id"],
+        name=user["name"],
+        email=user["email"],
+        team_id=user.get("team_id"),
         team_name=team_name,
-        token=token,
     )
+
+
+@router.get("/me")
+async def get_me(user_id: str, db: AsyncClient = Depends(get_db)):
+    """Look up user profile — used by desktop on startup to check if setup is needed."""
+    res = await db.table("users").select("*").eq("id", user_id).limit(1).execute()
+    if not res.data:
+        return None  # 200 with null = new user, needs setup
+
+    user = res.data[0]
+    team_name = None
+    if user.get("team_id"):
+        team_res = await db.table("teams").select("name").eq("id", user["team_id"]).limit(1).execute()
+        if team_res.data:
+            team_name = team_res.data[0]["name"]
+
+    return {
+        "user_id": user["id"],
+        "name": user["name"],
+        "email": user["email"],
+        "team_id": user.get("team_id"),
+        "team_name": team_name,
+    }
 
 
 class FocusRequest(BaseModel):
@@ -119,62 +89,40 @@ class FocusRequest(BaseModel):
 
 
 @router.post("/focus")
-async def set_focus(data: FocusRequest, db: AsyncSession = Depends(get_db)):
+async def set_focus(data: FocusRequest, db: AsyncClient = Depends(get_db)):
     """Enable focus/DND mode for N minutes."""
-    result = await db.execute(select(User).where(User.id == data.user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    res = await db.table("users").select("id").eq("id", data.user_id).limit(1).execute()
+    if not res.data:
         raise HTTPException(status_code=404, detail="User not found")
-    user.focus_until = datetime.utcnow() + timedelta(minutes=data.minutes)
-    await db.commit()
-    return {"active": True, "until": user.focus_until.isoformat()}
+    focus_until = (datetime.now(timezone.utc) + timedelta(minutes=data.minutes)).isoformat()
+    await db.table("users").update({"focus_until": focus_until}).eq("id", data.user_id).execute()
+    return {"active": True, "until": focus_until}
 
 
 @router.delete("/focus")
-async def clear_focus(user_id: str, db: AsyncSession = Depends(get_db)):
+async def clear_focus(user_id: str, db: AsyncClient = Depends(get_db)):
     """Disable focus/DND mode."""
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    user.focus_until = None
-    await db.commit()
+    await db.table("users").update({"focus_until": None}).eq("id", user_id).execute()
     return {"active": False, "until": None}
 
 
 @router.get("/focus")
-async def get_focus(user_id: str, db: AsyncSession = Depends(get_db)):
+async def get_focus(user_id: str, db: AsyncClient = Depends(get_db)):
     """Get current focus/DND status."""
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    now = datetime.utcnow()
-    active = bool(user.focus_until and user.focus_until > now)
-    return {
-        "active": active,
-        "until": user.focus_until.isoformat() if user.focus_until else None,
-    }
-
-
-@router.get("/me")
-async def get_me(user_id: str, db: AsyncSession = Depends(get_db)):
-    """Simple lookup by user_id (used by desktop on startup)."""
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+    res = await db.table("users").select("focus_until").eq("id", user_id).limit(1).execute()
+    if not res.data:
         raise HTTPException(status_code=404, detail="User not found")
 
-    team_name = None
-    if user.team_id:
-        team_result = await db.execute(select(Team).where(Team.id == user.team_id))
-        team = team_result.scalar_one_or_none()
-        team_name = team.name if team else None
+    focus_until_str = res.data[0].get("focus_until")
+    now = datetime.now(timezone.utc)
+    active = False
+    if focus_until_str:
+        try:
+            dt = datetime.fromisoformat(focus_until_str.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            active = dt > now
+        except ValueError:
+            pass
 
-    return {
-        "user_id": user.id,
-        "name": user.name,
-        "email": user.email,
-        "team_id": user.team_id,
-        "team_name": team_name,
-    }
+    return {"active": active, "until": focus_until_str if active else None}

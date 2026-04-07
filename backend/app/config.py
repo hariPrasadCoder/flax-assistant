@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24 * 7  # 7 days
     backend_port: int = 8747
 
+    # Supabase
+    supabase_url: str = ""
+    supabase_key: str = ""  # use the service role key for backend
+
     # Nudge engine tuning
     nudge_check_interval_minutes: int = 15  # base interval; adaptive logic overrides
     max_nudges_per_task_per_day: int = 4

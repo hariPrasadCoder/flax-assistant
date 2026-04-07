@@ -14,6 +14,7 @@
     "@electron-toolkit/utils": "^3.0.0",
     "@radix-ui/react-scroll-area": "^1.2.2",
     "@radix-ui/react-tooltip": "^1.1.6",
+    "@supabase/supabase-js": "^2.102.0",
     "date-fns": "^4.1.0",
     "electron-updater": "^6.3.9",
     "framer-motion": "^11.15.0",
@@ -36,15 +37,46 @@
   },
   "build": {
     "appId": "com.flax.assistant",
-    "productName": "Flax Assistant",
+    "productName": "Flaxie",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "flax-hq",
+        "repo": "flax-assistant"
+      }
+    ],
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "resources/icon.icns",
-      "target": ["dmg", "zip"]
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
     },
-    "files": ["out/**/*", "resources/**/*"],
+    "win": {
+      "icon": "resources/icon.ico",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": false,
+      "runAfterFinish": true
+    },
+    "files": [
+      "out/**/*",
+      "resources/**/*"
+    ],
     "extraResources": [
-      { "from": "resources", "to": "resources", "filter": ["**/*"] }
+      {
+        "from": "resources",
+        "to": "resources",
+        "filter": [
+          "**/*"
+        ]
+      }
     ]
   }
 }

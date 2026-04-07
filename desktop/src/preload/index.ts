@@ -16,6 +16,10 @@ contextBridge.exposeInMainWorld('flaxie', {
   // Backend URL
   getBackendUrl: () => ipcRenderer.invoke('get-backend-url'),
 
+  // Supabase config (URL + anon key) — passed from main so it can be set at package time
+  getSupabaseConfig: (): Promise<{ url: string; anonKey: string }> =>
+    ipcRenderer.invoke('get-supabase-config'),
+
   // WebSocket connection status
   getWsStatus: () => ipcRenderer.invoke('get-ws-status'),
   onWsStatus: (cb: (status: { connected: boolean }) => void) => {

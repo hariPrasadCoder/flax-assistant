@@ -5,8 +5,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from supabase import AsyncClient
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
@@ -14,7 +13,6 @@ from google.oauth2.credentials import Credentials
 logger = logging.getLogger(__name__)
 
 from ..database import get_db
-from ..models import User
 from ..config import settings
 
 router = APIRouter(prefix="/api/calendar", tags=["calendar"])
@@ -53,7 +51,7 @@ async def connect_calendar(user_id: str):
 
 
 @router.get("/callback")
-async def calendar_callback(code: str, state: str, db: AsyncSession = Depends(get_db)):
+async def calendar_callback(code: str, state: str, db: AsyncClient = Depends(get_db)):
     """Handle OAuth callback, store tokens."""
     user_id = state
     flow = get_flow()
@@ -67,25 +65,28 @@ async def calendar_callback(code: str, state: str, db: AsyncSession = Depends(ge
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes or SCOPES),
     }
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user:
+
+    res = await db.table("users").select("id").eq("id", user_id).limit(1).execute()
+    if not res.data:
         raise HTTPException(status_code=404, detail="User not found")
-    user.google_calendar_token = json.dumps(token_data)
-    await db.commit()
+
+    await db.table("users").update({
+        "google_calendar_token": json.dumps(token_data)
+    }).eq("id", user_id).execute()
+
     # Redirect back to app
     return RedirectResponse("http://localhost:5173/chat.html?calendar=connected")
 
 
 @router.get("/events")
-async def get_today_events(user_id: str, db: AsyncSession = Depends(get_db)):
+async def get_today_events(user_id: str, db: AsyncClient = Depends(get_db)):
     """Get today's calendar events for context injection."""
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if not user or not user.google_calendar_token:
+    res = await db.table("users").select("google_calendar_token").eq("id", user_id).limit(1).execute()
+    if not res.data or not res.data[0].get("google_calendar_token"):
         return {"events": [], "connected": False}
+
     try:
-        token_data = json.loads(user.google_calendar_token)
+        token_data = json.loads(res.data[0]["google_calendar_token"])
         creds = Credentials(
             token=token_data["token"],
             refresh_token=token_data.get("refresh_token"),
@@ -117,10 +118,6 @@ async def get_today_events(user_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/disconnect")
-async def disconnect_calendar(user_id: str, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalar_one_or_none()
-    if user:
-        user.google_calendar_token = None
-        await db.commit()
+async def disconnect_calendar(user_id: str, db: AsyncClient = Depends(get_db)):
+    await db.table("users").update({"google_calendar_token": None}).eq("id", user_id).execute()
     return {"ok": True}

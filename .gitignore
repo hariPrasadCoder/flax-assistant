@@ -14,6 +14,7 @@ backend/migrations/versions/*.py
 .env
 *.env
 backend/.env
+desktop/.env
 
 # Python
 __pycache__/

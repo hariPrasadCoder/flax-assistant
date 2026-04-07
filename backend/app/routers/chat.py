@@ -1,16 +1,16 @@
+from __future__ import annotations
 import time
 import uuid
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from supabase import AsyncClient
 from pydantic import BaseModel, validator
 from typing import Optional, List
 
-from ..database import get_db, AsyncSessionLocal
-from ..models import Task, TaskStatus, MemoryType, ChatMessage, NudgeLog, User
+from ..database import get_db
+from ..models import MemoryType
 from ..ai.brain import chat as ai_chat
 from ..ai.agent import agent_greeting
 from ..ai.memory import get_recent_memories, get_learnings, save_memory, upsert_learning
@@ -62,54 +62,53 @@ class ChatRequest(BaseModel):
 
 
 @router.get("/history")
-async def get_chat_history(user_id: str, limit: int = 50, db: AsyncSession = Depends(get_db)):
+async def get_chat_history(user_id: str, limit: int = 50, db: AsyncClient = Depends(get_db)):
     """Return the last N chat messages for a user, in chronological order."""
-    result = await db.execute(
-        select(ChatMessage)
-        .where(ChatMessage.user_id == user_id)
-        .order_by(ChatMessage.created_at.desc())
+    res = await (
+        db.table("chat_messages")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("created_at", desc=True)
         .limit(limit)
+        .execute()
     )
-    messages = result.scalars().all()
-    # Reverse to return chronological order
-    messages = list(reversed(messages))
+    messages = list(reversed(res.data or []))
     return [
         {
-            "id": m.id,
-            "role": m.role,
-            "content": m.content,
-            "created_at": m.created_at.isoformat(),
+            "id": m["id"],
+            "role": m["role"],
+            "content": m["content"],
+            "created_at": m["created_at"],
         }
         for m in messages
     ]
 
 
 @router.post("")
-async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
+async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
     _rate_limiter.check(req.user_id)
 
     # Fetch tasks for context
-    result = await db.execute(
-        select(Task)
-        .where(
-            (Task.assignee_id == req.user_id) | (Task.owner_id == req.user_id),
-            Task.status != TaskStatus.done,
-        )
-        .order_by(Task.deadline.asc().nullslast())
+    tasks_res = await (
+        db.table("tasks")
+        .select("*")
+        .or_(f"assignee_id.eq.{req.user_id},owner_id.eq.{req.user_id}")
+        .neq("status", "done")
+        .order("deadline", desc=False, nullsfirst=False)
         .limit(15)
+        .execute()
     )
-    tasks = result.scalars().all()
     tasks_data = [
         {
-            "id": t.id,
-            "title": t.title,
-            "status": t.status.value,
-            "deadline": t.deadline.isoformat() if t.deadline else None,
-            "created_at": t.created_at.isoformat(),
-            "nudge_count": t.nudge_count,
+            "id": t["id"],
+            "title": t["title"],
+            "status": t["status"],
+            "deadline": t.get("deadline"),
+            "created_at": t["created_at"],
+            "nudge_count": t.get("nudge_count", 0),
             "assignee": req.user_name,
         }
-        for t in tasks
+        for t in (tasks_res.data or [])
     ]
 
     # Fetch memory context
@@ -117,63 +116,82 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     learnings = await get_learnings(db, req.user_id)
 
     # Recent nudges for context
-    recent_nudges_result = await db.execute(
-        select(NudgeLog)
-        .where(NudgeLog.user_id == req.user_id)
-        .order_by(NudgeLog.sent_at.desc())
+    nudges_res = await (
+        db.table("nudge_logs")
+        .select("*")
+        .eq("user_id", req.user_id)
+        .order("sent_at", desc=True)
         .limit(5)
+        .execute()
     )
     recent_nudges = [
-        {"message": n.message, "sent_at": n.sent_at.isoformat(), "response": n.user_response}
-        for n in recent_nudges_result.scalars().all()
+        {"message": n["message"], "sent_at": n["sent_at"], "response": n.get("user_response")}
+        for n in (nudges_res.data or [])
     ]
 
     # Fetch focal task detail if this chat was triggered by a nudge
     focal_task = None
     if req.focal_task_id:
-        ft_result = await db.execute(
-            select(Task, User)
-            .join(User, Task.owner_id == User.id, isouter=True)
-            .where(Task.id == req.focal_task_id)
+        ft_res = await (
+            db.table("tasks")
+            .select("*, owner:users!owner_id(name, id)")
+            .eq("id", req.focal_task_id)
+            .limit(1)
+            .execute()
         )
-        row = ft_result.first()
-        if row:
-            t, owner = row
+        if ft_res.data:
+            t = ft_res.data[0]
+            owner = t.get("owner") or {}
             now = datetime.now(timezone.utc)
-            created = t.created_at.replace(tzinfo=timezone.utc) if t.created_at.tzinfo is None else t.created_at
-            days_open = (now - created).days
+            created_str = t.get("created_at", "")
+            try:
+                created = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                days_open = (now - created).days
+            except Exception:
+                days_open = 0
+
             deadline_str = None
-            if t.deadline:
-                dl = t.deadline.replace(tzinfo=timezone.utc) if t.deadline.tzinfo is None else t.deadline
-                hours_left = (dl - now).total_seconds() / 3600
-                if hours_left < 0:
-                    deadline_str = f"OVERDUE by {abs(int(hours_left))}h"
-                elif hours_left < 24:
-                    deadline_str = f"Due in {int(hours_left)}h"
-                else:
-                    deadline_str = f"Due in {int(hours_left/24)}d"
+            dl_raw = t.get("deadline")
+            if dl_raw:
+                try:
+                    dl = datetime.fromisoformat(dl_raw.replace("Z", "+00:00"))
+                    if dl.tzinfo is None:
+                        dl = dl.replace(tzinfo=timezone.utc)
+                    hours_left = (dl - now).total_seconds() / 3600
+                    if hours_left < 0:
+                        deadline_str = f"OVERDUE by {abs(int(hours_left))}h"
+                    elif hours_left < 24:
+                        deadline_str = f"Due in {int(hours_left)}h"
+                    else:
+                        deadline_str = f"Due in {int(hours_left/24)}d"
+                except Exception:
+                    pass
 
             # Get last nudge message for this task
-            last_nudge_result = await db.execute(
-                select(NudgeLog)
-                .where(NudgeLog.task_id == req.focal_task_id)
-                .order_by(NudgeLog.sent_at.desc())
+            last_nudge_res = await (
+                db.table("nudge_logs")
+                .select("message")
+                .eq("task_id", req.focal_task_id)
+                .order("sent_at", desc=True)
                 .limit(1)
+                .execute()
             )
-            last_nudge = last_nudge_result.scalar_one_or_none()
+            last_nudge_msg = last_nudge_res.data[0]["message"] if last_nudge_res.data else None
 
             focal_task = {
-                "id": t.id,
-                "title": t.title,
-                "status": t.status.value,
+                "id": t["id"],
+                "title": t["title"],
+                "status": t["status"],
                 "days_open": days_open,
                 "deadline_str": deadline_str,
-                "nudge_count": t.nudge_count,
-                "is_blocked": t.is_blocked or False,
-                "blocked_reason": t.blocked_reason,
-                "owner_name": owner.name if owner and owner.id != req.user_id else None,
-                "owner_id": t.owner_id if t.owner_id != req.user_id else None,
-                "last_nudge_message": last_nudge.message if last_nudge else None,
+                "nudge_count": t.get("nudge_count", 0),
+                "is_blocked": t.get("is_blocked") or False,
+                "blocked_reason": t.get("blocked_reason"),
+                "owner_name": owner.get("name") if owner.get("id") != req.user_id else None,
+                "owner_id": t.get("owner_id") if t.get("owner_id") != req.user_id else None,
+                "last_nudge_message": last_nudge_msg,
             }
 
     # Call AI
@@ -192,8 +210,13 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.error("AI chat failed for user %s: %s", req.user_id, e, exc_info=True)
         # Still save user message before returning error
-        db.add(ChatMessage(id=str(uuid.uuid4()), user_id=req.user_id, role="user", content=req.message))
-        await db.commit()
+        await db.table("chat_messages").insert({
+            "id": str(uuid.uuid4()),
+            "user_id": req.user_id,
+            "role": "user",
+            "content": req.message,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
         return {
             "reply": "I'm having a moment — could you try again in a few seconds?",
             "task_refs": [],
@@ -231,69 +254,78 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
     # Create tasks AI identified
     task_refs = list(ai_result.get("task_refs", []))
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     for t_data in ai_result.get("tasks_to_create", []):
         deadline = None
         if t_data.get("deadline"):
             try:
-                deadline = datetime.fromisoformat(t_data["deadline"].replace("Z", "+00:00"))
+                dt = datetime.fromisoformat(t_data["deadline"].replace("Z", "+00:00"))
+                deadline = dt.isoformat()
             except ValueError:
                 pass
 
-        task = Task(
-            title=t_data["title"],
-            description=t_data.get("description"),
-            deadline=deadline,
-            assignee_id=req.user_id,
-            owner_id=req.user_id,
-            source="chat",
-            is_team_visible=t_data.get("is_team_visible", True),
-        )
-        db.add(task)
-        await db.flush()
+        new_task_id = str(uuid.uuid4())
+        task_dict = {
+            "id": new_task_id,
+            "title": t_data["title"],
+            "description": t_data.get("description"),
+            "deadline": deadline,
+            "assignee_id": req.user_id,
+            "owner_id": req.user_id,
+            "source": "chat",
+            "is_team_visible": t_data.get("is_team_visible", True),
+            "status": "open",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "nudge_count": 0,
+        }
+        t_res = await db.table("tasks").insert(task_dict).execute()
+        created_task = t_res.data[0] if t_res.data else task_dict
 
         await save_memory(
             db=db,
             content=f"Task created from chat: '{t_data['title']}'",
             memory_type=MemoryType.task_event,
             user_id=req.user_id,
-            task_id=task.id,
+            task_id=created_task["id"],
             importance=0.7,
             ttl_hours=72,
         )
 
-        task_refs.append({"id": task.id, "title": task.title})
+        task_refs.append({"id": created_task["id"], "title": created_task["title"]})
         tasks_changed = True
 
     # Update tasks AI identified
     for update in ai_result.get("tasks_to_update", []):
-        task_result = await db.execute(select(Task).where(Task.id == update["id"]))
-        task = task_result.scalar_one_or_none()
-        if task:
-            if update.get("status"):
-                task.status = TaskStatus(update["status"])
-                if update["status"] == "done":
-                    task.completed_at = datetime.utcnow()
-                    # Celebrate!
-                    mascot_state = "celebrating"
-            task.updated_at = datetime.utcnow()
+        patch: dict = {"updated_at": now_iso}
+        if update.get("status"):
+            patch["status"] = update["status"]
+            if update["status"] == "done":
+                patch["completed_at"] = now_iso
+                mascot_state = "celebrating"
+        u_res = await db.table("tasks").update(patch).eq("id", update["id"]).execute()
+        if u_res.data:
             tasks_changed = True
 
     # Mark task blocked — AI decided this based on user saying they're stuck
     if ai_result.get("mark_blocked"):
         mb = ai_result["mark_blocked"]
-        bt_result = await db.execute(select(Task).where(Task.id == mb["task_id"]))
-        bt = bt_result.scalar_one_or_none()
-        if bt:
-            bt.is_blocked = True
-            bt.blocked_reason = mb.get("reason", "")
-            bt.updated_at = datetime.utcnow()
+        bt_patch = {
+            "is_blocked": True,
+            "blocked_reason": mb.get("reason", ""),
+            "updated_at": now_iso,
+        }
+        bt_res = await db.table("tasks").update(bt_patch).eq("id", mb["task_id"]).execute()
+        if bt_res.data:
+            bt = bt_res.data[0]
             tasks_changed = True
             await save_memory(
                 db=db,
-                content=f"Task '{bt.title}' marked blocked: {mb.get('reason', '')}",
+                content=f"Task '{bt['title']}' marked blocked: {mb.get('reason', '')}",
                 memory_type=MemoryType.task_event,
                 user_id=req.user_id,
-                task_id=bt.id,
+                task_id=bt["id"],
                 importance=0.8,
                 ttl_hours=72,
             )
@@ -302,7 +334,7 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     if ai_result.get("schedule_reminder"):
         sr = ai_result["schedule_reminder"]
         minutes = int(sr.get("minutes_from_now", 60))
-        reminder_msg = sr.get("message", f"Following up on your task")
+        reminder_msg = sr.get("message", "Following up on your task")
         task_id_for_reminder = sr.get("task_id")
         from ..scheduler import scheduler
         from apscheduler.triggers.date import DateTrigger
@@ -311,13 +343,17 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
         async def send_reminder(uid: str, msg: str, tid: str | None):
             from ..websocket_manager import ws_manager as _ws
+            from ..database import get_db as _get_db
             nudge_id = str(uuid_mod.uuid4())
-            async with AsyncSessionLocal() as rdb:
-                from ..models import NudgeLog as NLog
-                nl = NLog(id=nudge_id, user_id=uid, task_id=tid, message=msg,
-                         action_options="Got it,Let's talk")
-                rdb.add(nl)
-                await rdb.commit()
+            rdb = await _get_db()
+            await rdb.table("nudge_logs").insert({
+                "id": nudge_id,
+                "user_id": uid,
+                "task_id": tid,
+                "message": msg,
+                "action_options": "Got it,Let's talk",
+                "sent_at": datetime.now(timezone.utc).isoformat(),
+            }).execute()
             if uid in _ws.connected_users:
                 await _ws.send_nudge(uid, nudge_id, msg, ["Got it", "Let's talk"], tid)
 
@@ -332,55 +368,64 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
     # Notify owner — AI decided the owner should know about a blocker
     if ai_result.get("notify_owner"):
         no_data = ai_result["notify_owner"]
-        nt_result = await db.execute(select(Task).where(Task.id == no_data["task_id"]))
-        nt = nt_result.scalar_one_or_none()
-        if nt and nt.owner_id and nt.owner_id != req.user_id:
-            owner_msg = no_data.get("message", f"{req.user_name or 'Your teammate'} needs help with '{nt.title}'")
-            import uuid as uuid_mod2
-            owner_nudge_id = str(uuid_mod2.uuid4())
-            owner_nudge = NudgeLog(
-                id=owner_nudge_id,
-                user_id=nt.owner_id,
-                task_id=nt.id,
-                message=owner_msg,
-                action_options="On it,Let's talk",
-            )
-            db.add(owner_nudge)
-            if nt.owner_id in ws_manager.connected_users:
-                await ws_manager.send_nudge(nt.owner_id, owner_nudge_id, owner_msg, ["On it", "Let's talk"], nt.id)
+        nt_res = await db.table("tasks").select("*").eq("id", no_data["task_id"]).limit(1).execute()
+        if nt_res.data:
+            nt = nt_res.data[0]
+            if nt.get("owner_id") and nt["owner_id"] != req.user_id:
+                owner_msg = no_data.get("message", f"{req.user_name or 'Your teammate'} needs help with '{nt['title']}'")
+                owner_nudge_id = str(uuid.uuid4())
+                await db.table("nudge_logs").insert({
+                    "id": owner_nudge_id,
+                    "user_id": nt["owner_id"],
+                    "task_id": nt["id"],
+                    "message": owner_msg,
+                    "action_options": "On it,Let's talk",
+                    "sent_at": now_iso,
+                }).execute()
+                if nt["owner_id"] in ws_manager.connected_users:
+                    await ws_manager.send_nudge(nt["owner_id"], owner_nudge_id, owner_msg, ["On it", "Let's talk"], nt["id"])
 
     # Create subtasks — AI decided to break down the task
     if ai_result.get("create_subtasks"):
         for sub in ai_result["create_subtasks"]:
-            subtask = Task(
-                title=sub["title"],
-                description=f"Subtask of: {sub.get('parent_task_id', '')}",
-                assignee_id=req.user_id,
-                owner_id=req.user_id,
-                source="chat",
-                is_team_visible=True,
-            )
-            db.add(subtask)
-            await db.flush()
-            task_refs.append({"id": subtask.id, "title": subtask.title})
+            subtask_id = str(uuid.uuid4())
+            subtask_dict = {
+                "id": subtask_id,
+                "title": sub["title"],
+                "description": f"Subtask of: {sub.get('parent_task_id', '')}",
+                "assignee_id": req.user_id,
+                "owner_id": req.user_id,
+                "source": "chat",
+                "is_team_visible": True,
+                "status": "open",
+                "created_at": now_iso,
+                "updated_at": now_iso,
+                "nudge_count": 0,
+            }
+            sub_res = await db.table("tasks").insert(subtask_dict).execute()
+            created_sub = sub_res.data[0] if sub_res.data else subtask_dict
+            task_refs.append({"id": created_sub["id"], "title": created_sub["title"]})
             tasks_changed = True
 
     # Save chat to DB
-    db.add(ChatMessage(
-        id=str(uuid.uuid4()),
-        user_id=req.user_id,
-        role="user",
-        content=req.message,
-    ))
-    db.add(ChatMessage(
-        id=str(uuid.uuid4()),
-        user_id=req.user_id,
-        role="assistant",
-        content=reply,
-        task_ids=",".join(t["id"] for t in task_refs) if task_refs else None,
-    ))
-
-    await db.commit()
+    chat_rows = [
+        {
+            "id": str(uuid.uuid4()),
+            "user_id": req.user_id,
+            "role": "user",
+            "content": req.message,
+            "created_at": now_iso,
+        },
+        {
+            "id": str(uuid.uuid4()),
+            "user_id": req.user_id,
+            "role": "assistant",
+            "content": reply,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "task_ids": ",".join(t["id"] for t in task_refs) if task_refs else None,
+        },
+    ]
+    await db.table("chat_messages").insert(chat_rows).execute()
 
     # Push mascot state update if user is connected
     if req.user_id in ws_manager.connected_users:
@@ -395,23 +440,29 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/greeting")
-async def get_greeting(user_id: str, user_name: str = "", db: AsyncSession = Depends(get_db)):
+async def get_greeting(user_id: str, user_name: str = "", db: AsyncClient = Depends(get_db)):
     """
     Flaxie speaks first — context-aware opening message when chat opens.
     """
-    result = await db.execute(
-        select(Task)
-        .where(Task.assignee_id == user_id, Task.status != TaskStatus.done)
-        .order_by(Task.deadline.asc().nullslast())
+    tasks_res = await (
+        db.table("tasks")
+        .select("*")
+        .eq("assignee_id", user_id)
+        .neq("status", "done")
+        .order("deadline", desc=False, nullsfirst=False)
         .limit(10)
+        .execute()
     )
     tasks = [
         {
-            "id": t.id, "title": t.title, "status": t.status.value,
-            "deadline": t.deadline.isoformat() if t.deadline else None,
-            "created_at": t.created_at.isoformat(), "nudge_count": t.nudge_count,
+            "id": t["id"],
+            "title": t["title"],
+            "status": t["status"],
+            "deadline": t.get("deadline"),
+            "created_at": t["created_at"],
+            "nudge_count": t.get("nudge_count", 0),
         }
-        for t in result.scalars().all()
+        for t in (tasks_res.data or [])
     ]
     memories = await get_recent_memories(db, user_id)
     learnings = await get_learnings(db, user_id)

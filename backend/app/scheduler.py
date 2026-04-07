@@ -23,10 +23,9 @@ logger = logging.getLogger(__name__)
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import select
 
-from .database import AsyncSessionLocal
-from .models import Task, TaskStatus, NudgeLog, MemoryType, Memory, User
+from .database import get_db
+from .models import MemoryType
 from .ai.agent import run_agent
 from .ai.memory import get_recent_memories, get_learnings, save_memory
 from .websocket_manager import ws_manager
@@ -40,12 +39,13 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
     Collects all context, hands it to the agent, executes decisions.
     No deterministic filtering here — the agent reasons about time, focus, calendar.
     """
+    db = await get_db()
+
     # Load user info: timezone and focus_until — pass as context, don't filter here
-    async with AsyncSessionLocal() as db:
-        user_res = await db.execute(select(User).where(User.id == user_id))
-        user = user_res.scalar_one_or_none()
-        user_tz = user.timezone if user and user.timezone else "UTC"
-        focus_until = user.focus_until if user else None
+    user_res = await db.table("users").select("*").eq("id", user_id).limit(1).execute()
+    user = user_res.data[0] if user_res.data else None
+    user_tz = user["timezone"] if user and user.get("timezone") else "UTC"
+    focus_until_str = user["focus_until"] if user else None
 
     # Fetch today's calendar events for context
     calendar_events = []
@@ -60,174 +60,184 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
     except Exception:
         pass
 
-    async with AsyncSessionLocal() as db:
-        now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    since_24h = (now - timedelta(hours=24)).isoformat()
 
-        # Load active tasks
-        result = await db.execute(
-            select(Task)
-            .where(Task.assignee_id == user_id, Task.status != TaskStatus.done)
-            .order_by(Task.deadline.asc().nullslast())
-        )
-        tasks = [
-            {
-                "id": t.id,
-                "title": t.title,
-                "status": t.status.value,
-                "deadline": t.deadline.isoformat() if t.deadline else None,
-                "created_at": t.created_at.isoformat(),
-                "nudge_count": t.nudge_count,
-                "last_nudged_at": t.last_nudged_at.isoformat() if t.last_nudged_at else None,
-                "assignee": user_name,
-                "priority": t.priority if t.priority is not None else 3,
-                "is_blocked": t.is_blocked or False,
-                "blocked_reason": t.blocked_reason,
-            }
-            for t in result.scalars().all()
-        ]
+    # Load active tasks
+    tasks_res = await (
+        db.table("tasks")
+        .select("*")
+        .eq("assignee_id", user_id)
+        .neq("status", "done")
+        .order("deadline", desc=False, nullsfirst=False)
+        .execute()
+    )
+    tasks = [
+        {
+            "id": t["id"],
+            "title": t["title"],
+            "status": t["status"],
+            "deadline": t.get("deadline"),
+            "created_at": t["created_at"],
+            "nudge_count": t.get("nudge_count", 0),
+            "last_nudged_at": t.get("last_nudged_at"),
+            "assignee": user_name,
+            "priority": t.get("priority") if t.get("priority") is not None else 3,
+            "is_blocked": t.get("is_blocked") or False,
+            "blocked_reason": t.get("blocked_reason"),
+        }
+        for t in (tasks_res.data or [])
+    ]
 
-        # Tasks this user OWNS that are assigned to someone else
-        owned_result = await db.execute(
-            select(Task, User)
-            .join(User, Task.assignee_id == User.id)
-            .where(
-                Task.owner_id == user_id,
-                Task.assignee_id != user_id,
-                Task.status != TaskStatus.done
+    # Tasks this user OWNS that are assigned to someone else
+    owned_res = await (
+        db.table("tasks")
+        .select("*, assignee:users!assignee_id(name)")
+        .eq("owner_id", user_id)
+        .neq("assignee_id", user_id)
+        .neq("status", "done")
+        .order("deadline", desc=False, nullsfirst=False)
+        .execute()
+    )
+    owned_tasks = []
+    for t in (owned_res.data or []):
+        assignee_info = t.get("assignee") or {}
+        owned_tasks.append({
+            "id": t["id"],
+            "title": t["title"],
+            "status": t["status"],
+            "deadline": t.get("deadline"),
+            "created_at": t["created_at"],
+            "nudge_count": t.get("nudge_count", 0),
+            "last_nudged_at": t.get("last_nudged_at"),
+            "assignee": assignee_info.get("name") if isinstance(assignee_info, dict) else None,
+            "assignee_id": t.get("assignee_id"),
+            "priority": t.get("priority") if t.get("priority") is not None else 3,
+        })
+
+    # Load recent nudges (24h)
+    nudge_res = await (
+        db.table("nudge_logs")
+        .select("*")
+        .eq("user_id", user_id)
+        .gte("sent_at", since_24h)
+        .order("sent_at", desc=True)
+        .limit(10)
+        .execute()
+    )
+    recent_nudges = [
+        {
+            "message": n["message"],
+            "sent_at": n["sent_at"],
+            "response": n.get("user_response"),
+            "task_id": n.get("task_id"),
+        }
+        for n in (nudge_res.data or [])
+    ]
+
+    # Load memories
+    memories = await get_recent_memories(db, user_id)
+    learnings = await get_learnings(db, user_id)
+
+    # Run the agent — it decides whether to nudge, stay silent, etc.
+    result = await run_agent(
+        tasks=tasks,
+        memories=memories,
+        learnings=learnings,
+        recent_nudges=recent_nudges,
+        user_name=user_name,
+        owned_tasks=owned_tasks,
+        user_id=user_id,
+        user_tz=user_tz,
+        calendar_events=calendar_events,
+        focus_until=focus_until_str,
+    )
+
+    mascot_state = result.get("mascot_state", "idle")
+    next_check_minutes = result.get("next_check_minutes", 30)
+    actions = result.get("actions", [])
+
+    # Push mascot state
+    if user_id in ws_manager.connected_users:
+        await ws_manager.send_mascot_state(user_id, mascot_state)
+
+    # Execute each action the agent decided on
+    for action in actions:
+        tool_name = action.get("tool")
+        message = action.get("message", "")
+        action_options = action.get("action_options", ["Got it", "Let's talk"])
+        task_id = action.get("task_id")
+
+        if tool_name in ("send_notification", "ask_checkin", "celebrate", "suggest_breakdown"):
+            if user_id not in ws_manager.connected_users:
+                continue
+
+            nudge_id = str(uuid.uuid4())
+
+            # Record nudge in DB
+            await db.table("nudge_logs").insert({
+                "id": nudge_id,
+                "user_id": user_id,
+                "task_id": task_id,
+                "message": message,
+                "action_options": ",".join(action_options),
+                "sent_at": now_iso,
+            }).execute()
+
+            # Update task nudge tracking — fetch current count first, then increment
+            if task_id:
+                task_fetch = await db.table("tasks").select("nudge_count").eq("id", task_id).limit(1).execute()
+                if task_fetch.data:
+                    current_count = task_fetch.data[0].get("nudge_count") or 0
+                    await db.table("tasks").update({
+                        "nudge_count": current_count + 1,
+                        "last_nudged_at": now_iso,
+                    }).eq("id", task_id).execute()
+
+            # Save to memory
+            await save_memory(
+                db=db,
+                content=f"Flaxie sent notification: {message}",
+                memory_type=MemoryType.task_event,
+                user_id=user_id,
+                task_id=task_id,
+                importance=0.6,
+                ttl_hours=48,
             )
-            .order_by(Task.deadline.asc().nullslast())
-        )
-        owned_tasks = [
-            {
-                "id": t.id, "title": t.title, "status": t.status.value,
-                "deadline": t.deadline.isoformat() if t.deadline else None,
-                "created_at": t.created_at.isoformat(),
-                "nudge_count": t.nudge_count,
-                "last_nudged_at": t.last_nudged_at.isoformat() if t.last_nudged_at else None,
-                "assignee": u.name,  # who's doing the work
-                "assignee_id": t.assignee_id,
-                "priority": t.priority if t.priority is not None else 3,
-            }
-            for t, u in owned_result.all()
-        ]
 
-        # Load recent nudges (24h)
-        nudge_result = await db.execute(
-            select(NudgeLog)
-            .where(NudgeLog.user_id == user_id, NudgeLog.sent_at >= now - timedelta(hours=24))
-            .order_by(NudgeLog.sent_at.desc())
-            .limit(10)
-        )
-        recent_nudges = [
-            {
-                "message": n.message,
-                "sent_at": n.sent_at.isoformat(),
-                "response": n.user_response,
-                "task_id": n.task_id,
-            }
-            for n in nudge_result.scalars().all()
-        ]
+            # Push to desktop
+            await ws_manager.send_nudge(
+                user_id=user_id,
+                nudge_id=nudge_id,
+                message=message,
+                action_options=action_options,
+                task_id=task_id,
+            )
+            logger.info("[agent] notified %s: %s...", user_id, message[:60])
 
-        # Load memories
-        memories = await get_recent_memories(db, user_id)
-        learnings = await get_learnings(db, user_id)
+        elif tool_name == "compress_memories":
+            # Agent decided to compress old memories
+            compress_since = (now - timedelta(hours=24)).isoformat()
+            old_res = await (
+                db.table("memories")
+                .select("id")
+                .eq("user_id", user_id)
+                .eq("compressed", False)
+                .neq("type", MemoryType.learning.value)
+                .lt("created_at", compress_since)
+                .limit(15)
+                .execute()
+            )
+            ids_to_compress = [m["id"] for m in (old_res.data or [])]
+            if ids_to_compress:
+                await db.table("memories").update({"compressed": True}).in_("id", ids_to_compress).execute()
+                logger.info("[agent] compressed %d memories for %s", len(ids_to_compress), user_id)
 
-        # Run the agent — it decides whether to nudge, stay silent, etc.
-        result = await run_agent(
-            tasks=tasks,
-            memories=memories,
-            learnings=learnings,
-            recent_nudges=recent_nudges,
-            user_name=user_name,
-            owned_tasks=owned_tasks,
-            user_id=user_id,
-            user_tz=user_tz,
-            calendar_events=calendar_events,
-            focus_until=focus_until.isoformat() if focus_until else None,
-        )
-
-        mascot_state = result.get("mascot_state", "idle")
-        next_check_minutes = result.get("next_check_minutes", 30)
-        actions = result.get("actions", [])
-
-        # Push mascot state
-        if user_id in ws_manager.connected_users:
-            await ws_manager.send_mascot_state(user_id, mascot_state)
-
-        # Execute each action the agent decided on
-        for action in actions:
-            tool_name = action.get("tool")
-            message = action.get("message", "")
-            action_options = action.get("action_options", ["Got it", "Let's talk"])
-            task_id = action.get("task_id")
-
-            if tool_name in ("send_notification", "ask_checkin", "celebrate", "suggest_breakdown"):
-                if user_id not in ws_manager.connected_users:
-                    continue
-
-                nudge_id = str(uuid.uuid4())
-
-                # Record nudge in DB
-                nudge_log = NudgeLog(
-                    id=nudge_id,
-                    user_id=user_id,
-                    task_id=task_id,
-                    message=message,
-                    action_options=",".join(action_options),
-                )
-                db.add(nudge_log)
-
-                # Update task nudge tracking
-                if task_id:
-                    task_res = await db.execute(select(Task).where(Task.id == task_id))
-                    task = task_res.scalar_one_or_none()
-                    if task:
-                        task.nudge_count += 1
-                        task.last_nudged_at = now
-
-                # Save to memory
-                await save_memory(
-                    db=db,
-                    content=f"Flaxie sent notification: {message}",
-                    memory_type=MemoryType.task_event,
-                    user_id=user_id,
-                    task_id=task_id,
-                    importance=0.6,
-                    ttl_hours=48,
-                )
-
-                # Push to desktop
-                await ws_manager.send_nudge(
-                    user_id=user_id,
-                    nudge_id=nudge_id,
-                    message=message,
-                    action_options=action_options,
-                    task_id=task_id,
-                )
-                logger.info("[agent] notified %s: %s...", user_id, message[:60])
-
-            elif tool_name == "compress_memories":
-                # Agent decided to compress old memories
-                old_memories_res = await db.execute(
-                    select(Memory).where(
-                        Memory.user_id == user_id,
-                        Memory.compressed == False,
-                        Memory.type != MemoryType.learning,
-                        Memory.created_at < now - timedelta(hours=24),
-                    ).limit(15)
-                )
-                compressed_count = 0
-                for m in old_memories_res.scalars().all():
-                    m.compressed = True
-                    compressed_count += 1
-                logger.info("[agent] compressed %d memories for %s", compressed_count, user_id)
-
-            elif tool_name == "set_focus_mode":
-                # Agent set focus mode — already executed via HTTP in the tool itself
-                minutes = action.get("minutes", 0)
-                logger.info("[agent] focus mode set for %s (%dmin)", user_id, minutes)
-
-        await db.commit()
+        elif tool_name == "set_focus_mode":
+            # Agent set focus mode — already executed via HTTP in the tool itself
+            minutes = action.get("minutes", 0)
+            logger.info("[agent] focus mode set for %s (%dmin)", user_id, minutes)
 
     # Agent decides when to run next
     next_run = datetime.now(timezone.utc) + timedelta(minutes=next_check_minutes)
@@ -248,117 +258,127 @@ async def run_reflection_cycle(user_id: str, user_name: str | None = None):
     Completely separate from the nudge cycle — different goal, different cadence.
     """
     from .ai.brain import reflect
-    from .models import ChatMessage
-    import uuid
+    import uuid as _uuid
 
     logger.info("[reflection] starting cycle for %s", user_id)
 
-    async with AsyncSessionLocal() as db:
-        # Load user context
-        user_res = await db.execute(select(User).where(User.id == user_id))
-        user = user_res.scalar_one_or_none()
-        if not user:
-            return
+    db = await get_db()
 
-        user_tz = user.timezone if user and user.timezone else "UTC"
-        now = datetime.now(timezone.utc)
+    # Load user context
+    user_res = await db.table("users").select("*").eq("id", user_id).limit(1).execute()
+    if not user_res.data:
+        return
 
-        # Load open tasks
-        open_result = await db.execute(
-            select(Task)
-            .where(Task.assignee_id == user_id, Task.status != TaskStatus.done)
-            .order_by(Task.deadline.asc().nullslast())
+    user = user_res.data[0]
+    user_tz = user.get("timezone") or "UTC"
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    since_7d = (now - timedelta(days=7)).isoformat()
+
+    # Load open tasks
+    open_res = await (
+        db.table("tasks")
+        .select("*")
+        .eq("assignee_id", user_id)
+        .neq("status", "done")
+        .order("deadline", desc=False, nullsfirst=False)
+        .execute()
+    )
+    tasks = [
+        {
+            "id": t["id"],
+            "title": t["title"],
+            "status": t["status"],
+            "deadline": t.get("deadline"),
+            "created_at": t["created_at"],
+            "nudge_count": t.get("nudge_count", 0),
+            "assignee": user_name,
+            "is_blocked": t.get("is_blocked") or False,
+        }
+        for t in (open_res.data or [])
+    ]
+
+    # Load tasks completed in the last 7 days
+    done_res = await (
+        db.table("tasks")
+        .select("*")
+        .eq("assignee_id", user_id)
+        .eq("status", "done")
+        .gte("updated_at", since_7d)
+        .order("updated_at", desc=True)
+        .limit(20)
+        .execute()
+    )
+    done_tasks = [
+        {"id": t["id"], "title": t["title"], "completed_at": t.get("updated_at")}
+        for t in (done_res.data or [])
+    ]
+
+    # Load nudges from last 7 days
+    nudge_res = await (
+        db.table("nudge_logs")
+        .select("*")
+        .eq("user_id", user_id)
+        .gte("sent_at", since_7d)
+        .order("sent_at", desc=True)
+        .limit(20)
+        .execute()
+    )
+    recent_nudges = [
+        {"message": n["message"], "sent_at": n["sent_at"], "response": n.get("user_response")}
+        for n in (nudge_res.data or [])
+    ]
+
+    memories = await get_recent_memories(db, user_id)
+    learnings = await get_learnings(db, user_id)
+
+    # Run the reflection
+    result = await reflect(
+        tasks=tasks,
+        done_tasks=done_tasks,
+        memories=memories,
+        learnings=learnings,
+        recent_nudges=recent_nudges,
+        user_name=user_name,
+        user_tz=user_tz,
+        days_to_review=7,
+    )
+
+    next_hours = result.get("next_reflection_hours", 24)
+
+    if result.get("should_share") and result.get("message"):
+        message = result["message"]
+
+        # Save as a chat message from Flaxie — appears in chat when user opens
+        msg_id = str(_uuid.uuid4())
+        await db.table("chat_messages").insert({
+            "id": msg_id,
+            "user_id": user_id,
+            "role": "assistant",
+            "content": message,
+            "created_at": now_iso,
+        }).execute()
+
+        # Also save to memory so future cycles know this was shared
+        await save_memory(
+            db=db,
+            content=f"Flaxie weekly reflection: {message}",
+            memory_type=MemoryType.conversation,
+            user_id=user_id,
+            importance=0.8,
+            ttl_hours=168,  # 7 days
         )
-        tasks = [
-            {
-                "id": t.id, "title": t.title, "status": t.status.value,
-                "deadline": t.deadline.isoformat() if t.deadline else None,
-                "created_at": t.created_at.isoformat(),
-                "nudge_count": t.nudge_count,
-                "assignee": user_name,
-                "is_blocked": t.is_blocked or False,
-            }
-            for t in open_result.scalars().all()
-        ]
 
-        # Load tasks completed in the last 7 days
-        done_result = await db.execute(
-            select(Task)
-            .where(
-                Task.assignee_id == user_id,
-                Task.status == TaskStatus.done,
-                Task.updated_at >= now - timedelta(days=7),
-            )
-            .order_by(Task.updated_at.desc())
-            .limit(20)
-        )
-        done_tasks = [
-            {"id": t.id, "title": t.title, "completed_at": t.updated_at.isoformat() if t.updated_at else None}
-            for t in done_result.scalars().all()
-        ]
+        # Push live if user is connected — as a chat message, not a notification
+        if user_id in ws_manager.connected_users:
+            await ws_manager.send_reflection(user_id, message, result.get("mascot_state", "idle"))
 
-        # Load nudges from last 7 days
-        nudge_result = await db.execute(
-            select(NudgeLog)
-            .where(NudgeLog.user_id == user_id, NudgeLog.sent_at >= now - timedelta(days=7))
-            .order_by(NudgeLog.sent_at.desc())
-            .limit(20)
-        )
-        recent_nudges = [
-            {"message": n.message, "sent_at": n.sent_at.isoformat(), "response": n.user_response}
-            for n in nudge_result.scalars().all()
-        ]
+        logger.info("[reflection] insight shared for %s: %s...", user_id, message[:60])
+    else:
+        logger.info("[reflection] nothing meaningful to share for %s", user_id)
 
-        memories = await get_recent_memories(db, user_id)
-        learnings = await get_learnings(db, user_id)
-
-        # Run the reflection
-        result = await reflect(
-            tasks=tasks,
-            done_tasks=done_tasks,
-            memories=memories,
-            learnings=learnings,
-            recent_nudges=recent_nudges,
-            user_name=user_name,
-            user_tz=user_tz,
-            days_to_review=7,
-        )
-
-        next_hours = result.get("next_reflection_hours", 24)
-
-        if result.get("should_share") and result.get("message"):
-            message = result["message"]
-
-            # Save as a chat message from Flaxie — appears in chat when user opens
-            msg_id = str(uuid.uuid4())
-            db.add(ChatMessage(
-                id=msg_id,
-                user_id=user_id,
-                role="assistant",
-                content=message,
-            ))
-
-            # Also save to memory so future cycles know this was shared
-            await save_memory(
-                db=db,
-                content=f"Flaxie weekly reflection: {message}",
-                memory_type=MemoryType.conversation,
-                user_id=user_id,
-                importance=0.8,
-                ttl_hours=168,  # 7 days
-            )
-
-            # Push live if user is connected — as a chat message, not a notification
-            if user_id in ws_manager.connected_users:
-                await ws_manager.send_reflection(user_id, message, result.get("mascot_state", "idle"))
-
-            logger.info("[reflection] insight shared for %s: %s...", user_id, message[:60])
-        else:
-            logger.info("[reflection] nothing meaningful to share for %s", user_id)
-
-        # Update last_reflection_at
-        user.last_reflection_at = now
-        await db.commit()
+    # Update last_reflection_at
+    await db.table("users").update({"last_reflection_at": now_iso}).eq("id", user_id).execute()
 
     # Schedule next reflection — agent decided the timing
     next_run = datetime.now(timezone.utc) + timedelta(hours=next_hours)

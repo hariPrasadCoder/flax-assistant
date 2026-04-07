@@ -10,6 +10,7 @@ import {
 } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
+import { autoUpdater } from 'electron-updater'
 
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) { app.quit(); process.exit(0) }
@@ -24,8 +25,10 @@ let wsConnected = false
 let pendingNotifData: object | null = null
 let activeUserId = 'local'
 
-const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:8747'
-const WS_BASE_URL = process.env.WS_URL      || 'ws://localhost:8747/ws/mascot'
+const BACKEND_URL      = import.meta.env.MAIN_VITE_BACKEND_URL      || 'http://localhost:8747'
+const WS_BASE_URL      = import.meta.env.MAIN_VITE_WS_URL           || 'ws://localhost:8747/ws/mascot'
+const SUPABASE_URL     = import.meta.env.MAIN_VITE_SUPABASE_URL      || ''
+const SUPABASE_ANON_KEY = import.meta.env.MAIN_VITE_SUPABASE_ANON_KEY || ''
 const CHAT_WIDTH  = 380
 const CHAT_HEIGHT = 540
 const NOTIF_WIDTH  = 380
@@ -275,6 +278,7 @@ function registerIPC() {
   ipcMain.on('open-chat-from-notif', () => { closeNotifWindow(); toggleChat() })
   ipcMain.on('dismiss-nudge', () => tray?.setImage(makeTrayIcon('idle')))
   ipcMain.handle('get-backend-url', () => BACKEND_URL)
+  ipcMain.handle('get-supabase-config', () => ({ url: SUPABASE_URL, anonKey: SUPABASE_ANON_KEY }))
   ipcMain.handle('get-notif-data', () => pendingNotifData)
   ipcMain.handle('get-ws-status', () => wsConnected)
 
@@ -303,6 +307,8 @@ app.whenReady().then(() => {
     tray?.popUpContextMenu(Menu.buildFromTemplate([
       { label: 'Open Flaxie', click: toggleChat },
       { type: 'separator' },
+      { label: `Version ${app.getVersion()}`, enabled: false },
+      { type: 'separator' },
       { label: 'Quit', click: () => app.quit() },
     ]))
   })
@@ -310,6 +316,16 @@ app.whenReady().then(() => {
   startWSRelay()
 
   globalShortcut.register('CommandOrControl+Shift+F', toggleChat)
+
+  // Auto-updater — only runs in packaged builds, not dev
+  if (!is.dev) {
+    autoUpdater.autoDownload = true
+    autoUpdater.autoInstallOnAppQuit = true
+    autoUpdater.checkForUpdates().catch(() => { /* no internet, ignore */ })
+    autoUpdater.on('update-downloaded', () => {
+      tray?.setToolTip('Flaxie — Update ready (restart to apply)')
+    })
+  }
 })
 
 app.on('window-all-closed', (e: Event) => e.preventDefault())

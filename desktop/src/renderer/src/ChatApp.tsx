@@ -5,6 +5,7 @@ import TaskChip from './chat/TaskChip'
 import Onboarding from './chat/Onboarding'
 import { useChatStore } from './store/chatStore'
 import type { Message } from './chat/MessageBubble'
+import { parseTaskDate } from './lib/parseTaskDate'
 
 declare global {
   interface Window {
@@ -158,14 +159,17 @@ const PRIORITY_DOTS: { p: number; color: string }[] = [
   { p: 5, color: '#FF4757' },
 ]
 
-function QuickAddTask({ onAdd }: { onAdd: (title: string, priority: number) => void }) {
+function QuickAddTask({ onAdd }: { onAdd: (title: string, priority: number, deadline: string | null) => void }) {
   const [value, setValue] = useState('')
   const [active, setActive] = useState(false)
   const [priority, setPriority] = useState(3)
 
+  const parsed = value.trim() ? parseTaskDate(value) : null
+
   function submit() {
     if (!value.trim()) return
-    onAdd(value.trim(), priority)
+    const { title, deadline } = parsed ?? { title: value.trim(), deadline: null }
+    onAdd(title, priority, deadline)
     setValue('')
     setPriority(3)
     setActive(false)
@@ -185,7 +189,7 @@ function QuickAddTask({ onAdd }: { onAdd: (title: string, priority: number) => v
               value={value}
               onChange={e => setValue(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') submit(); if (e.key === 'Escape') setActive(false) }}
-              placeholder="Task title..."
+              placeholder="Task title... (e.g. 'Submit report by Friday')"
               style={{
                 flex: 1, border: 'none', outline: 'none', background: 'none',
                 fontSize: 13, color: '#1a1730', fontFamily: 'inherit',
@@ -201,6 +205,27 @@ function QuickAddTask({ onAdd }: { onAdd: (title: string, priority: number) => v
               cursor: 'pointer', fontSize: 14, padding: '0 2px',
             }}>✕</button>
           </div>
+
+          {/* Deadline preview */}
+          {parsed?.deadlineLabel && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 5, paddingLeft: 2,
+            }}>
+              <svg width="11" height="11" viewBox="0 0 16 16" fill="none" style={{ flexShrink: 0 }}>
+                <rect x="2" y="3" width="12" height="11" rx="2" stroke="#5A53E1" strokeWidth="1.5"/>
+                <path d="M5 1v3M11 1v3M2 7h12" stroke="#5A53E1" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+              <span style={{ fontSize: 10.5, color: '#5A53E1', fontWeight: 600 }}>
+                {parsed.deadlineLabel}
+              </span>
+              {parsed.title !== value.trim() && (
+                <span style={{ fontSize: 10, color: '#9B97CC' }}>
+                  · title: "{parsed.title}"
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Priority selector */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, paddingLeft: 2 }}>
             <span style={{ fontSize: 10, color: '#9B97CC', fontFamily: 'IBM Plex Mono, monospace' }}>Priority</span>
@@ -471,17 +496,20 @@ export default function ChatApp() {
     setTasks(await tr.json())
   }
 
-  async function quickAddTask(title: string, priority = 3) {
+  async function quickAddTask(title: string, priority = 3, deadline: string | null = null) {
     try {
       const res = await fetch(`${backendUrl}/api/tasks`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title, user_id: userId, status: 'open', priority }),
+        body: JSON.stringify({ title, user_id: userId, status: 'open', priority, deadline }),
       })
       const t = await res.json()
       const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
       setTasks(await tr.json())
+      const deadlineNote = deadline
+        ? ` Due ${new Date(deadline).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}.`
+        : ''
       addMessage({ id: `add_${Date.now()}`, role: 'assistant', timestamp: new Date(),
-        content: `Added "${t.title}" to your list. I'll keep an eye on it.`,
+        content: `Added "${t.title}" to your list.${deadlineNote} I'll keep an eye on it.`,
         task_refs: [{ id: t.id, title: t.title }],
       })
     } catch {}

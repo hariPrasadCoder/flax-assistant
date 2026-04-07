@@ -1,0 +1,54 @@
+{
+  "family": "flax-assistant-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "arn:aws:iam::<YOUR_ACCOUNT_ID>:role/ecsTaskExecutionRole",
+  "containerDefinitions": [
+    {
+      "name": "flax-assistant",
+      "image": "<YOUR_ACCOUNT_ID>.dkr.ecr.<YOUR_REGION>.amazonaws.com/flax-assistant:latest",
+      "portMappings": [
+        {
+          "containerPort": 8747,
+          "protocol": "tcp"
+        }
+      ],
+      "essential": true,
+      "environment": [
+        { "name": "APP_ENV", "value": "production" }
+      ],
+      "secrets": [
+        { "name": "SUPABASE_URL",        "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:SUPABASE_URL::" },
+        { "name": "SUPABASE_KEY",        "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:SUPABASE_KEY::" },
+        { "name": "SECRET_KEY",          "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:SECRET_KEY::" },
+        { "name": "GEMINI_API_KEY",      "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:GEMINI_API_KEY::" },
+        { "name": "CORS_ORIGINS",        "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:CORS_ORIGINS::" },
+        { "name": "GOOGLE_CLIENT_ID",    "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:GOOGLE_CLIENT_ID::" },
+        { "name": "GOOGLE_CLIENT_SECRET","valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:GOOGLE_CLIENT_SECRET::" },
+        { "name": "SENTRY_DSN",          "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:SENTRY_DSN::" },
+        { "name": "LANGFUSE_PUBLIC_KEY", "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:LANGFUSE_PUBLIC_KEY::" },
+        { "name": "LANGFUSE_SECRET_KEY", "valueFrom": "arn:aws:secretsmanager:<YOUR_REGION>:<YOUR_ACCOUNT_ID>:secret:flax-assistant/api:LANGFUSE_SECRET_KEY::" }
+      ],
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8747/health')\" || exit 1"
+        ],
+        "interval": 30,
+        "timeout": 10,
+        "retries": 3,
+        "startPeriod": 40
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/flax-assistant",
+          "awslogs-region": "<YOUR_REGION>",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}

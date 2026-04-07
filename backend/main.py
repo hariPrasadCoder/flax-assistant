@@ -12,7 +12,6 @@ from sentry_sdk.integrations.fastapi import FastApiIntegration
 from sentry_sdk.integrations.starlette import StarletteIntegration
 
 from app.config import settings
-from app.database import init_db
 from app.scheduler import start_scheduler, stop_scheduler
 from app.routers import tasks, chat, websocket, nudges, auth, team, calendar
 
@@ -43,7 +42,6 @@ if settings.sentry_dsn:
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Flax Assistant backend starting (env=%s)", settings.app_env)
-    await init_db()
     start_scheduler()
     logger.info("Flax Assistant backend running")
     yield
@@ -84,12 +82,13 @@ async def health():
 
 @app.post("/api/debug/nudge")
 async def debug_nudge(user_id: str = "any", message: str = "Hey! Just checking in — how are your tasks going?"):
+    if settings.app_env == "production":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not found")
     """Dev-only: send a test notification. user_id='any' sends to first connected user."""
     import uuid
     from app.websocket_manager import ws_manager
-    from sqlalchemy import select
-    from app.database import AsyncSessionLocal
-    from app.models import User
+    from app.database import get_db
 
     nudge_id = str(uuid.uuid4())
 
@@ -100,11 +99,13 @@ async def debug_nudge(user_id: str = "any", message: str = "Hey! Just checking i
             target_id = list(ws_manager.connections.keys())[0]
         else:
             # Try first DB user as fallback
-            async with AsyncSessionLocal() as db:
-                result = await db.execute(select(User).order_by(User.created_at.asc()).limit(1))
-                u = result.scalar_one_or_none()
-                if u:
-                    target_id = u.id
+            try:
+                db = await get_db()
+                res = await db.table("users").select("id").order("created_at").limit(1).execute()
+                if res.data:
+                    target_id = res.data[0]["id"]
+            except Exception:
+                pass
 
     await ws_manager.send_nudge(
         user_id=target_id,
