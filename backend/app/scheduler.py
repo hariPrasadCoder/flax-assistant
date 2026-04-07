@@ -27,7 +27,7 @@ from apscheduler.triggers.date import DateTrigger
 from .database import get_db
 from .models import MemoryType
 from .ai.agent import run_agent
-from .ai.memory import get_recent_memories, get_learnings, save_memory
+from .ai.memory import get_recent_memories, get_learnings, save_memory, upsert_learning, compress_and_learn
 from .websocket_manager import ws_manager
 
 scheduler = AsyncIOScheduler(timezone="UTC")
@@ -217,22 +217,9 @@ async def run_agent_cycle(user_id: str, user_name: str | None = None):
             logger.info("[agent] notified %s: %s...", user_id, message[:60])
 
         elif tool_name == "compress_memories":
-            # Agent decided to compress old memories
-            compress_since = (now - timedelta(hours=24)).isoformat()
-            old_res = await (
-                db.table("memories")
-                .select("id")
-                .eq("user_id", user_id)
-                .eq("compressed", False)
-                .neq("type", MemoryType.learning.value)
-                .lt("created_at", compress_since)
-                .limit(15)
-                .execute()
-            )
-            ids_to_compress = [m["id"] for m in (old_res.data or [])]
-            if ids_to_compress:
-                await db.table("memories").update({"compressed": True}).in_("id", ids_to_compress).execute()
-                logger.info("[agent] compressed %d memories for %s", len(ids_to_compress), user_id)
+            # Agent decided to compress — actually summarize into learnings via LLM
+            count = await compress_and_learn(db, user_id)
+            logger.info("[agent] compressed %d memories into learnings for %s", count, user_id)
 
         elif tool_name == "set_focus_mode":
             # Agent set focus mode — already executed via HTTP in the tool itself
@@ -345,6 +332,11 @@ async def run_reflection_cycle(user_id: str, user_name: str | None = None):
     )
 
     next_hours = result.get("next_reflection_hours", 24)
+
+    # Always persist any behavioral insights the reflection surfaced
+    for learning in result.get("learnings_to_save", []):
+        if isinstance(learning, str) and learning.strip():
+            await upsert_learning(db, user_id, learning.strip(), importance=0.75)
 
     if result.get("should_share") and result.get("message"):
         message = result["message"]

@@ -557,14 +557,14 @@ def build_context_message(context: dict) -> str:
     memories = context.get("memories", [])
     if memories:
         lines.append("RECENT CONTEXT (48h):")
-        for m in memories[-6:]:
+        for m in memories[-10:]:
             lines.append(f"  {m['content']}")
         lines.append("")
 
     learnings = context.get("learnings", [])
     if learnings:
         lines.append("WHAT I KNOW ABOUT THIS USER:")
-        for l in learnings[-4:]:
+        for l in learnings[-8:]:
             lines.append(f"  • {l['content']}")
         lines.append("")
 

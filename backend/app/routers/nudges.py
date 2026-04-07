@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from ..database import get_db
 from ..models import MemoryType
-from ..ai.memory import save_memory
+from ..ai.memory import save_memory, upsert_learning
 from ..websocket_manager import ws_manager
 
 router = APIRouter(prefix="/api/nudges", tags=["nudges"])
@@ -110,6 +110,22 @@ async def respond_to_nudge(nudge_id: str, body: RespondRequest, db: AsyncClient 
             "updated_at": now_iso,
         }).eq("id", task["id"]).execute()
 
+        # Save outcome learning: how long + how many nudges it took
+        try:
+            created_str = task.get("created_at", "")
+            if created_str:
+                created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                days_taken = (datetime.now(timezone.utc) - created_dt).days
+                nudge_count = task.get("nudge_count", 0)
+                await upsert_learning(
+                    db=db,
+                    user_id=nudge["user_id"],
+                    content=f"Completed '{task['title']}' in {days_taken} day(s) after {nudge_count} nudge(s)",
+                    importance=0.6,
+                )
+        except Exception:
+            pass
+
         # Notify the owner if different from responder and connected
         if task.get("owner_id") and task["owner_id"] != nudge["user_id"]:
             if task["owner_id"] in ws_manager.connected_users:
@@ -183,6 +199,26 @@ async def respond_to_nudge(nudge_id: str, body: RespondRequest, db: AsyncClient 
 
     elif action_type == "chat":
         open_chat = True
+
+    # Snooze/ignore pattern: if this task has been dismissed 3+ times, learn from it
+    if action_type in ("snooze", "ack") and task_id:
+        try:
+            history_res = await db.table("nudge_logs").select("user_response").eq(
+                "task_id", task_id
+            ).eq("user_id", nudge["user_id"]).execute()
+            dismiss_count = sum(
+                1 for n in (history_res.data or [])
+                if n.get("user_response") and infer_action_type(n["user_response"]) in ("snooze", "ack")
+            )
+            if dismiss_count >= 3 and task:
+                await upsert_learning(
+                    db=db,
+                    user_id=nudge["user_id"],
+                    content=f"User has dismissed nudges about '{task['title']}' {dismiss_count} times — may need a different approach or task reconsideration",
+                    importance=0.75,
+                )
+        except Exception:
+            pass
 
     return {"ok": True, "open_chat": open_chat, "chat_context": chat_context}
 

@@ -153,14 +153,14 @@ def build_context(
     # Recent memories (last 48h)
     if memories:
         lines.append("RECENT CONTEXT (last 48h):")
-        for m in memories[-8:]:  # Last 8 memories
+        for m in memories[-12:]:
             lines.append(f"  [{m.get('type', 'memory')}] {m['content']}")
         lines.append("")
 
     # Long-term learnings
     if learnings:
         lines.append("WHAT I KNOW ABOUT THIS USER:")
-        for l in learnings[-5:]:
+        for l in learnings:
             lines.append(f"  • {l['content']}")
         lines.append("")
 
@@ -494,8 +494,12 @@ Respond with JSON:
   "should_share": true or false,
   "message": "The insight to share in chat — 2-4 sentences max, conversational, specific. Empty string if should_share is false.",
   "mascot_state": "idle|alert|celebrating|concerned",
-  "next_reflection_hours": 18-36
-}}"""
+  "next_reflection_hours": 18-36,
+  "learnings_to_save": ["specific behavioral insight 1", "specific behavioral insight 2"]
+}}
+
+learnings_to_save: up to 3 durable, specific insights about this user's patterns worth remembering long-term.
+Only include what's actually evidenced by the data. Empty array if nothing new stands out."""
 
     langfuse = get_langfuse_client()
 
