@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { useState, useEffect } from 'react'
-import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import type { SupabaseClient } from '@supabase/supabase-js'
+import { getSupabase } from '../lib/supabase'
 import { authFetch } from '../lib/api'
 
 const PERSONAL_DOMAINS = new Set([
@@ -73,15 +74,18 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
   const [error, setError] = useState('')
   const [resendCooldown, setResendCooldown] = useState(0)
 
-  // Load Supabase client — try env vars first (Vite injects VITE_ prefix), fall back to IPC
+  // Load Supabase client from shared singleton
   useEffect(() => {
-    const url = import.meta.env.VITE_SUPABASE_URL as string | undefined
-    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined
-    if (url && anonKey) {
-      setSupabase(createClient(url, anonKey))
+    const client = getSupabase()
+    if (client) {
+      setSupabase(client)
     } else {
+      // Fallback: try IPC (for builds where env vars weren't baked in)
       window.flaxie.getSupabaseConfig().then(({ url: u, anonKey: k }) => {
-        if (u && k) setSupabase(createClient(u, k))
+        if (u && k) {
+          const { createClient } = require('@supabase/supabase-js')
+          setSupabase(createClient(u, k))
+        }
       })
     }
   }, [])
