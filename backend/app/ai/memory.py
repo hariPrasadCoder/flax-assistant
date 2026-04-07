@@ -120,10 +120,13 @@ async def upsert_learning(
     content: str,
     importance: float = 0.7,
 ) -> None:
-    """Save a learning about the user — skips insert if a similar one already exists."""
+    """Save a learning — uses Jaccard fast-pass then LLM semantic dedup."""
+    import logging
+    logger = logging.getLogger(__name__)
+
     res = await (
         db.table("memories")
-        .select("*")
+        .select("id, content, importance")
         .eq("user_id", user_id)
         .eq("type", MemoryType.learning.value)
         .eq("compressed", False)
@@ -131,12 +134,40 @@ async def upsert_learning(
     )
     existing = res.data or []
 
-    # If any existing learning is >60% similar, bump its importance and stop
-    for m in existing:
-        if _word_overlap(content, m["content"]) > 0.6:
-            new_importance = max(m["importance"], importance)
-            await db.table("memories").update({"importance": new_importance}).eq("id", m["id"]).execute()
-            return
+    if existing:
+        # Fast Jaccard pass — catches near-exact duplicates cheaply
+        for m in existing:
+            if _word_overlap(content, m["content"]) > 0.6:
+                new_importance = max(m["importance"], importance)
+                await db.table("memories").update({"importance": new_importance}).eq("id", m["id"]).execute()
+                return
+
+        # Semantic LLM pass — catches paraphrase/synonym duplicates Jaccard misses
+        try:
+            from .llm import llm_complete
+            from ..config import settings
+            if settings.gemini_api_key:
+                existing_text = "\n".join(f"- {m['content']}" for m in existing[:10])
+                raw = await llm_complete(
+                    system="You are a deduplication assistant. Answer only 'yes' or 'no'.",
+                    messages=[{"role": "user", "content": (
+                        f"Existing learnings about this user:\n{existing_text}\n\n"
+                        f"New insight: \"{content}\"\n\n"
+                        "Is this new insight already captured (same meaning) by any existing learning?"
+                    )}],
+                    model="gemini/gemini-2.5-flash",
+                    temperature=0.0,
+                    max_tokens=5,
+                )
+                if raw.strip().lower().startswith("yes"):
+                    # Bump importance on the most word-similar existing learning
+                    best = max(existing, key=lambda m: _word_overlap(content, m["content"]))
+                    await db.table("memories").update(
+                        {"importance": max(best["importance"], importance)}
+                    ).eq("id", best["id"]).execute()
+                    return
+        except Exception as e:
+            logger.debug("LLM dedup check failed, inserting anyway: %s", e)
 
     await save_memory(
         db=db,
@@ -146,3 +177,63 @@ async def upsert_learning(
         importance=importance,
         ttl_hours=None,  # permanent
     )
+
+
+async def compress_and_learn(db: AsyncClient, user_id: str) -> int:
+    """
+    Summarize recent short-term memories into durable learnings via LLM.
+    Marks compressed memories so they stop appearing in context.
+    Returns the number of memories compressed.
+    """
+    import json
+    import logging
+    logger = logging.getLogger(__name__)
+
+    compress_since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+
+    old_res = await (
+        db.table("memories")
+        .select("*")
+        .eq("user_id", user_id)
+        .eq("compressed", False)
+        .neq("type", MemoryType.learning.value)
+        .lt("created_at", compress_since)
+        .limit(20)
+        .execute()
+    )
+    memories = old_res.data or []
+    if not memories:
+        return 0
+
+    content_block = "\n".join(f"- {m['content']}" for m in memories)
+
+    try:
+        from .llm import llm_complete
+        from ..config import settings
+        if settings.gemini_api_key:
+            raw = await llm_complete(
+                system="You extract behavioral insights from activity logs. Be specific and concise.",
+                messages=[{"role": "user", "content": (
+                    f"Recent activity for this user:\n{content_block}\n\n"
+                    "Extract 1-3 specific, durable insights about this user's behavior, "
+                    "work patterns, or preferences. Only include insights actually evidenced "
+                    "by this data. Skip generic observations.\n\n"
+                    'Return a JSON array of strings, e.g. ["User completes tasks faster when deadlines are self-set"]\n'
+                    "Return only the JSON array."
+                )}],
+                model="gemini/gemini-2.5-flash",
+                temperature=0.3,
+                max_tokens=300,
+            )
+            insights = json.loads(raw.strip())
+            if isinstance(insights, list):
+                for insight in insights[:3]:
+                    if isinstance(insight, str) and insight.strip():
+                        await upsert_learning(db, user_id, insight.strip(), importance=0.65)
+    except Exception as e:
+        logger.warning("[memory] compress_and_learn LLM step failed: %s", e)
+
+    # Mark as compressed regardless of whether LLM extraction succeeded
+    ids = [m["id"] for m in memories]
+    await db.table("memories").update({"compressed": True}).in_("id", ids).execute()
+    return len(ids)

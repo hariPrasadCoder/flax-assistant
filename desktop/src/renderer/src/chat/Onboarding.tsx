@@ -121,42 +121,53 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
     if (otp.length < 8 || !supabase) return
     setLoading(true)
     setError('')
+
+    // Step 1: Supabase OTP verification
+    let uid: string
+    let uemail: string
     try {
       const { data, error: err } = await supabase.auth.verifyOtp({
         email: email.trim().toLowerCase(),
         token: otp.trim(),
         type: 'email',
       })
-      if (err || !data.user) { setError(err?.message || 'Invalid code'); return }
+      if (err || !data.user) {
+        setError(err?.message || 'Invalid or expired code — try again')
+        setLoading(false)
+        return
+      }
+      uid = data.user.id
+      uemail = data.user.email || email.trim().toLowerCase()
+    } catch (e: any) {
+      setError(e?.message || 'Verification failed — check your connection')
+      setLoading(false)
+      return
+    }
 
-      const uid = data.user.id
-      const uemail = data.user.email || email.trim().toLowerCase()
-      setUserId(uid)
-      setUserEmail(uemail)
+    setUserId(uid)
+    setUserEmail(uemail)
+    window.flaxie.setUserId(uid)
+    localStorage.setItem('flaxie_user_id', uid)
+    localStorage.setItem('flaxie_user_email', uemail)
 
-      // Tell main process the real user ID so WebSocket reconnects correctly
-      window.flaxie.setUserId(uid)
-      localStorage.setItem('flaxie_user_id', uid)
-      localStorage.setItem('flaxie_user_email', uemail)
-
-      // Check if user already has a profile
+    // Step 2: Check backend profile (non-fatal — if backend unreachable, treat as new user)
+    try {
       const meRes = await fetch(`${backendUrl}/api/auth/me?user_id=${uid}`)
-      const me = await meRes.json()
-
-      if (me && me.name) {
-        // Returning user — restore their info and go straight to team step
-        localStorage.setItem('flaxie_user_name', me.name)
-        if (me.team_id) localStorage.setItem('flaxie_team_id', me.team_id)
-        onComplete(uid, me.name, me.team_id || null)
-      } else {
-        // New user — needs to set their name
-        setStep('name')
+      if (meRes.ok) {
+        const me = await meRes.json()
+        if (me && me.name) {
+          localStorage.setItem('flaxie_user_name', me.name)
+          if (me.team_id) localStorage.setItem('flaxie_team_id', me.team_id)
+          onComplete(uid, me.name, me.team_id || null)
+          return
+        }
       }
     } catch {
-      setError('Verification failed — try again')
-    } finally {
-      setLoading(false)
+      // Backend unreachable — continue to name setup
     }
+
+    setStep('name')
+    setLoading(false)
   }
 
   async function handleSetupProfile() {

@@ -228,26 +228,6 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
     mascot_state = ai_result.get("mascot_state", "listening")
     tasks_changed = False
 
-    # Save user message to memory
-    await save_memory(
-        db=db,
-        content=f"User said: {req.message}",
-        memory_type=MemoryType.conversation,
-        user_id=req.user_id,
-        importance=0.5,
-        ttl_hours=48,
-    )
-
-    # Save assistant reply to memory
-    await save_memory(
-        db=db,
-        content=f"Flaxie replied: {reply}",
-        memory_type=MemoryType.conversation,
-        user_id=req.user_id,
-        importance=0.4,
-        ttl_hours=48,
-    )
-
     # Save learning if AI found one
     if ai_result.get("memory_to_save"):
         await upsert_learning(db, req.user_id, ai_result["memory_to_save"])
@@ -307,6 +287,22 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
         u_res = await db.table("tasks").update(patch).eq("id", update["id"]).execute()
         if u_res.data:
             tasks_changed = True
+            if update.get("status") == "done":
+                t = u_res.data[0]
+                try:
+                    created_str = t.get("created_at", "")
+                    if created_str:
+                        created_dt = datetime.fromisoformat(created_str.replace("Z", "+00:00"))
+                        days_taken = (datetime.now(timezone.utc) - created_dt).days
+                        nudge_count = t.get("nudge_count", 0)
+                        await upsert_learning(
+                            db=db,
+                            user_id=req.user_id,
+                            content=f"Completed '{t['title']}' in {days_taken} day(s) after {nudge_count} nudge(s)",
+                            importance=0.6,
+                        )
+                except Exception:
+                    pass
 
     # Mark task blocked — AI decided this based on user saying they're stuck
     if ai_result.get("mark_blocked"):

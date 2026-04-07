@@ -1,5 +1,55 @@
 import { useEffect, useRef, useState } from 'react'
 
+function renderMarkdown(text: string) {
+  const lines = text.split('\n')
+  const elements: React.ReactNode[] = []
+  let i = 0
+
+  function renderInline(line: string): React.ReactNode[] {
+    const parts = line.split(/(\*\*.*?\*\*|\*.*?\*)/g)
+    return parts.map((part, idx) => {
+      if (part.startsWith('**') && part.endsWith('**'))
+        return <strong key={idx}>{part.slice(2, -2)}</strong>
+      if (part.startsWith('*') && part.endsWith('*'))
+        return <em key={idx}>{part.slice(1, -1)}</em>
+      return part
+    })
+  }
+
+  while (i < lines.length) {
+    const line = lines[i]
+    if (line.trim() === '') {
+      elements.push(<div key={`sp-${i}`} style={{ height: 4 }} />)
+      i++; continue
+    }
+    if (/^(\s*[-•*]|\s*\d+\.) /.test(line)) {
+      const items: string[] = []
+      while (i < lines.length && /^(\s*[-•*]|\s*\d+\.) /.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*[-•*\d.]+\s*/, ''))
+        i++
+      }
+      elements.push(
+        <ul key={`ul-${i}`} style={{ margin: '4px 0', paddingLeft: 14, listStyle: 'none' }}>
+          {items.map((item, j) => (
+            <li key={j} style={{ display: 'flex', gap: 6, marginBottom: 2 }}>
+              <span style={{ color: '#5A53E1', flexShrink: 0 }}>•</span>
+              <span>{renderInline(item)}</span>
+            </li>
+          ))}
+        </ul>
+      )
+      continue
+    }
+    elements.push(
+      <p key={`p-${i}`} style={{ margin: 0, marginBottom: i < lines.length - 1 ? 3 : 0 }}>
+        {renderInline(line)}
+      </p>
+    )
+    i++
+  }
+  return elements
+}
+
 interface NotifData {
   nudgeId: string
   message: string
@@ -167,12 +217,12 @@ export default function NotifBanner() {
 
           {/* Message */}
           <div style={{ padding: '0 14px 12px' }}>
-            <p style={{
+            <div style={{
               fontSize: '13.5px', color: '#1C1C1E', lineHeight: '1.5',
               fontWeight: '400',
             }}>
-              {data?.message || ''}
-            </p>
+              {data?.message ? renderMarkdown(data.message) : null}
+            </div>
             {data?.taskTitle && (
               <p style={{
                 fontSize: '11.5px', color: '#5A53E1', fontWeight: '500',
