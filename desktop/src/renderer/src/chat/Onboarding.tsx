@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
 import { useState, useEffect } from 'react'
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
+import { authFetch } from '../lib/api'
 
 const PERSONAL_DOMAINS = new Set([
   'gmail.com', 'googlemail.com',
@@ -138,6 +139,10 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
       }
       uid = data.user.id
       uemail = data.user.email || email.trim().toLowerCase()
+      // Store token for authenticated API calls
+      if (data.session?.access_token) {
+        localStorage.setItem('flaxie_token', data.session.access_token)
+      }
     } catch (e: any) {
       setError(e?.message || 'Verification failed — check your connection')
       setLoading(false)
@@ -152,7 +157,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
 
     // Step 2: Check backend profile (non-fatal — if backend unreachable, treat as new user)
     try {
-      const meRes = await fetch(`${backendUrl}/api/auth/me?user_id=${uid}`)
+      const meRes = await authFetch(`${backendUrl}/api/auth/me?user_id=${uid}`)
       if (meRes.ok) {
         const me = await meRes.json()
         if (me && me.name) {
@@ -175,7 +180,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(`${backendUrl}/api/auth/setup`, {
+      const res = await authFetch(`${backendUrl}/api/auth/setup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ user_id: userId, name: name.trim(), email: userEmail }),
@@ -208,7 +213,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
     setError('')
     try {
       if (teamChoice === 'create') {
-        const res = await fetch(`${backendUrl}/api/team/create`, {
+        const res = await authFetch(`${backendUrl}/api/team/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: teamName.trim(), user_id: uid }),
@@ -218,7 +223,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
         localStorage.setItem('flaxie_invite_code', data.invite_code)
         onComplete(uid, uname, data.team_id)
       } else if (teamChoice === 'join') {
-        const res = await fetch(`${backendUrl}/api/team/join`, {
+        const res = await authFetch(`${backendUrl}/api/team/join`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ invite_code: inviteCode.trim().toUpperCase(), user_id: uid }),

@@ -9,22 +9,23 @@ from pydantic import BaseModel
 from typing import Optional
 
 from ..database import get_db
+from ..deps import get_current_user_id
 
 router = APIRouter(prefix="/api/team", tags=["team"])
 
 
 class CreateTeamRequest(BaseModel):
     name: str
-    user_id: str
+    user_id: Optional[str] = None  # ignored — user_id comes from auth token
 
 
 class JoinTeamRequest(BaseModel):
     invite_code: str
-    user_id: str
+    user_id: Optional[str] = None  # ignored — user_id comes from auth token
 
 
 @router.post("/create")
-async def create_team(data: CreateTeamRequest, db: AsyncClient = Depends(get_db)):
+async def create_team(data: CreateTeamRequest, db: AsyncClient = Depends(get_db), user_id: str = Depends(get_current_user_id)):
     team_id = str(uuid.uuid4())
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -35,13 +36,8 @@ async def create_team(data: CreateTeamRequest, db: AsyncClient = Depends(get_db)
         "created_at": now_iso,
     }).execute()
 
-    # Verify user exists
-    user_res = await db.table("users").select("id").eq("id", data.user_id).limit(1).execute()
-    if not user_res.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
     # Assign user to team
-    await db.table("users").update({"team_id": team_id}).eq("id", data.user_id).execute()
+    await db.table("users").update({"team_id": team_id}).eq("id", user_id).execute()
 
     # Generate DB-backed invite code
     code = secrets.token_urlsafe(6).upper()[:8]
@@ -62,7 +58,7 @@ async def create_team(data: CreateTeamRequest, db: AsyncClient = Depends(get_db)
 
 
 @router.post("/join")
-async def join_team(data: JoinTeamRequest, db: AsyncClient = Depends(get_db)):
+async def join_team(data: JoinTeamRequest, db: AsyncClient = Depends(get_db), user_id: str = Depends(get_current_user_id)):
     now_iso = datetime.now(timezone.utc).isoformat()
     now = datetime.now(timezone.utc)
 
@@ -87,10 +83,6 @@ async def join_team(data: JoinTeamRequest, db: AsyncClient = Depends(get_db)):
         except Exception:
             pass
 
-    user_res = await db.table("users").select("id").eq("id", data.user_id).limit(1).execute()
-    if not user_res.data:
-        raise HTTPException(status_code=404, detail="User not found")
-
     team_res = await db.table("teams").select("name").eq("id", invite["team_id"]).limit(1).execute()
     if not team_res.data:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -98,14 +90,14 @@ async def join_team(data: JoinTeamRequest, db: AsyncClient = Depends(get_db)):
     team_name = team_res.data[0]["name"]
 
     # Assign user to team and mark invite used
-    await db.table("users").update({"team_id": invite["team_id"]}).eq("id", data.user_id).execute()
+    await db.table("users").update({"team_id": invite["team_id"]}).eq("id", user_id).execute()
     await db.table("invite_codes").update({"used": True}).eq("code", data.invite_code).execute()
 
     return {"team_id": invite["team_id"], "team_name": team_name}
 
 
 @router.get("/generate-invite")
-async def generate_invite(team_id: str, db: AsyncClient = Depends(get_db)):
+async def generate_invite(team_id: str, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     code = secrets.token_urlsafe(6).upper()[:8]
     now_iso = datetime.now(timezone.utc).isoformat()
     expires_at = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()
@@ -120,7 +112,7 @@ async def generate_invite(team_id: str, db: AsyncClient = Depends(get_db)):
 
 
 @router.get("/overview")
-async def team_overview(team_id: str, db: AsyncClient = Depends(get_db)):
+async def team_overview(team_id: str, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     """Team dashboard: who's working on what."""
     # Get all team members
     members_res = await db.table("users").select("id, name").eq("team_id", team_id).execute()

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { authFetch } from './lib/api'
 
 function renderMarkdown(text: string) {
   const lines = text.split('\n')
@@ -134,7 +135,7 @@ export default function NotifBanner() {
     }
 
     // Fire-and-forget — backend handles side effects (mark done, ping owner, etc.)
-    fetch(`${data.backendUrl}/api/nudges/${data.nudgeId}/respond`, {
+    authFetch(`${data.backendUrl}/api/nudges/${data.nudgeId}/respond`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ response: action }),

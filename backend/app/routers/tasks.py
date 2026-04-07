@@ -6,6 +6,7 @@ from typing import Optional
 import uuid
 
 from ..database import get_db
+from ..deps import get_current_user_id
 from ..models import MemoryType
 from ..ai.memory import save_memory
 
@@ -21,7 +22,7 @@ class TaskCreate(BaseModel):
     team_id: Optional[str] = None
     is_team_visible: bool = True
     source: str = "chat"
-    user_id: str  # the requesting user
+    user_id: Optional[str] = None  # ignored — user_id comes from auth token
     priority: Optional[int] = 3
     is_blocked: Optional[bool] = False
 
@@ -62,7 +63,7 @@ class TaskResponse(BaseModel):
 
 
 @router.get("")
-async def list_tasks(user_id: str, db: AsyncClient = Depends(get_db)):
+async def list_tasks(user_id: str = Depends(get_current_user_id), db: AsyncClient = Depends(get_db)):
     res = await (
         db.table("tasks")
         .select("*")
@@ -97,7 +98,7 @@ async def list_tasks(user_id: str, db: AsyncClient = Depends(get_db)):
 
 
 @router.post("")
-async def create_task(data: TaskCreate, db: AsyncClient = Depends(get_db)):
+async def create_task(data: TaskCreate, db: AsyncClient = Depends(get_db), user_id: str = Depends(get_current_user_id)):
     deadline = None
     if data.deadline:
         try:
@@ -114,8 +115,8 @@ async def create_task(data: TaskCreate, db: AsyncClient = Depends(get_db)):
         "title": data.title,
         "description": data.description,
         "deadline": deadline,
-        "assignee_id": data.assignee_id or data.user_id,
-        "owner_id": data.owner_id or data.user_id,
+        "assignee_id": data.assignee_id or user_id,
+        "owner_id": data.owner_id or user_id,
         "team_id": data.team_id,
         "source": data.source,
         "is_team_visible": data.is_team_visible,
@@ -134,7 +135,7 @@ async def create_task(data: TaskCreate, db: AsyncClient = Depends(get_db)):
         db=db,
         content=f"Task created: '{data.title}'" + (f" (due {data.deadline})" if data.deadline else ""),
         memory_type=MemoryType.task_event,
-        user_id=data.user_id,
+        user_id=user_id,
         task_id=task["id"],
         importance=0.7,
         ttl_hours=72,
@@ -148,7 +149,7 @@ async def create_task(data: TaskCreate, db: AsyncClient = Depends(get_db)):
 
 
 @router.patch("/{task_id}")
-async def update_task(task_id: str, data: TaskUpdate, db: AsyncClient = Depends(get_db)):
+async def update_task(task_id: str, data: TaskUpdate, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     # Fetch existing task
     res = await db.table("tasks").select("*").eq("id", task_id).limit(1).execute()
     if not res.data:
@@ -201,7 +202,7 @@ async def update_task(task_id: str, data: TaskUpdate, db: AsyncClient = Depends(
 
 
 @router.post("/{task_id}/assign")
-async def assign_task(task_id: str, data: AssignRequest, db: AsyncClient = Depends(get_db)):
+async def assign_task(task_id: str, data: AssignRequest, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     res = await db.table("tasks").select("id").eq("id", task_id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Task not found")
@@ -221,7 +222,7 @@ async def assign_task(task_id: str, data: AssignRequest, db: AsyncClient = Depen
 
 
 @router.delete("/{task_id}")
-async def delete_task(task_id: str, db: AsyncClient = Depends(get_db)):
+async def delete_task(task_id: str, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     res = await db.table("tasks").select("id").eq("id", task_id).limit(1).execute()
     if not res.data:
         raise HTTPException(status_code=404, detail="Task not found")

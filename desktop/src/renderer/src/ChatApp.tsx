@@ -6,6 +6,7 @@ import Onboarding from './chat/Onboarding'
 import { useChatStore } from './store/chatStore'
 import type { Message } from './chat/MessageBubble'
 import { parseTaskDate } from './lib/parseTaskDate'
+import { authFetch } from './lib/api'
 
 declare global {
   interface Window {
@@ -287,7 +288,7 @@ export default function ChatApp() {
   // Load tasks when ready
   useEffect(() => {
     if (!backendUrl || !userId) return
-    fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+    authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
       .then(r => r.json()).then(setTasks).catch(() => {})
   }, [backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -301,7 +302,7 @@ export default function ChatApp() {
     async function loadHistoryOrGreet() {
       // Try to load chat history first
       try {
-        const histRes = await fetch(`${backendUrl}/api/chat/history?user_id=${userId}&limit=50`)
+        const histRes = await authFetch(`${backendUrl}/api/chat/history?user_id=${userId}&limit=50`)
         const histData = await histRes.json()
         if (Array.isArray(histData) && histData.length > 0) {
           histData.forEach((msg: any) => addMessage({
@@ -317,7 +318,7 @@ export default function ChatApp() {
 
       // No history — show greeting
       try {
-        const r = await fetch(`${backendUrl}/api/chat/greeting?user_id=${userId}&user_name=${encodeURIComponent(userName)}`)
+        const r = await authFetch(`${backendUrl}/api/chat/greeting?user_id=${userId}&user_name=${encodeURIComponent(userName)}`)
         const data = await r.json()
         addMessage({
           id: 'welcome',
@@ -347,7 +348,7 @@ export default function ChatApp() {
     if (!backendUrl || !userId) return
     const teamId = localStorage.getItem('flaxie_team_id')
     if (!teamId) return
-    fetch(`${backendUrl}/api/team/overview?team_id=${teamId}`)
+    authFetch(`${backendUrl}/api/team/overview?team_id=${teamId}`)
       .then(r => r.json())
       .then(d => setTeamMembers((d.members || []).filter((m: any) => m.user_id !== userId)))
       .catch(() => {})
@@ -380,7 +381,7 @@ export default function ChatApp() {
       addMessage({ id: `n_${Date.now()}`, role: 'user', content: userText, timestamp: new Date() })
       setLoading(true)
       try {
-        const res = await fetch(`${backendUrl}/api/chat`, {
+        const res = await authFetch(`${backendUrl}/api/chat`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             message: userText,
@@ -433,7 +434,7 @@ export default function ChatApp() {
     setLoading(true)
 
     try {
-      const res = await fetch(`${backendUrl}/api/chat`, {
+      const res = await authFetch(`${backendUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -444,7 +445,7 @@ export default function ChatApp() {
       const data = await res.json()
       addMessage({ id: `a_${Date.now()}`, role: 'assistant', content: data.reply, timestamp: new Date(), task_refs: data.task_refs })
       if (data.tasks_changed) {
-        const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+        const tr = await authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
         setTasks(await tr.json())
       }
     } catch (err) {
@@ -458,11 +459,11 @@ export default function ChatApp() {
   async function markTaskDone(taskId: string) {
     updateTaskStatus(taskId, 'done')
     try {
-      await fetch(`${backendUrl}/api/tasks/${taskId}`, {
+      await authFetch(`${backendUrl}/api/tasks/${taskId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status: 'done' }),
       })
-      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      const tr = await authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
       const freshTasks = await tr.json()
       setTasks(freshTasks)
       const remaining = freshTasks.filter((t: any) => t.status !== 'done').length
@@ -478,11 +479,11 @@ export default function ChatApp() {
 
   async function handleTaskUpdate(taskId: string, patch: object) {
     try {
-      await fetch(`${backendUrl}/api/tasks/${taskId}`, {
+      await authFetch(`${backendUrl}/api/tasks/${taskId}`, {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       })
-      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      const tr = await authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
       setTasks(await tr.json())
     } catch {}
   }
@@ -490,20 +491,20 @@ export default function ChatApp() {
   async function archiveDoneTasks() {
     const done = tasks.filter(t => t.status === 'done')
     await Promise.all(done.map(t =>
-      fetch(`${backendUrl}/api/tasks/${t.id}`, { method: 'DELETE' }).catch(() => {})
+      authFetch(`${backendUrl}/api/tasks/${t.id}`, { method: 'DELETE' }).catch(() => {})
     ))
-    const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+    const tr = await authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
     setTasks(await tr.json())
   }
 
   async function quickAddTask(title: string, priority = 3, deadline: string | null = null) {
     try {
-      const res = await fetch(`${backendUrl}/api/tasks`, {
+      const res = await authFetch(`${backendUrl}/api/tasks`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title, user_id: userId, status: 'open', priority, deadline }),
       })
       const t = await res.json()
-      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      const tr = await authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
       setTasks(await tr.json())
       const deadlineNote = deadline
         ? ` Due ${new Date(deadline).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}.`
@@ -517,11 +518,11 @@ export default function ChatApp() {
 
   async function assignTask(taskId: string, assigneeId: string) {
     try {
-      await fetch(`${backendUrl}/api/tasks/${taskId}/assign`, {
+      await authFetch(`${backendUrl}/api/tasks/${taskId}/assign`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ assignee_id: assigneeId, owner_id: userId }),
       })
-      const tr = await fetch(`${backendUrl}/api/tasks?user_id=${userId}`)
+      const tr = await authFetch(`${backendUrl}/api/tasks?user_id=${userId}`)
       setTasks(await tr.json())
     } catch {}
   }
@@ -901,7 +902,7 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
 
   useEffect(() => {
     if (!backendUrl || !userId) return
-    fetch(`${backendUrl}/api/auth/me?user_id=${userId}`)
+    authFetch(`${backendUrl}/api/auth/me?user_id=${userId}`)
       .then(r => r.json())
       .then(data => {
         setProfile(data)
@@ -912,7 +913,7 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
 
   useEffect(() => {
     if (!backendUrl || !userId) return
-    fetch(`${backendUrl}/api/auth/focus?user_id=${userId}`)
+    authFetch(`${backendUrl}/api/auth/focus?user_id=${userId}`)
       .then(r => r.json())
       .then(setFocusStatus)
       .catch(() => {})
@@ -920,7 +921,7 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
 
   useEffect(() => {
     if (!backendUrl || !userId) return
-    fetch(`${backendUrl}/api/calendar/events?user_id=${userId}`)
+    authFetch(`${backendUrl}/api/calendar/events?user_id=${userId}`)
       .then(r => r.json())
       .then(data => {
         setCalendarConnected(data.connected)
@@ -932,31 +933,31 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
   useEffect(() => {
     if (!showHistory || !backendUrl || !userId) return
     setHistoryLoaded(false)
-    fetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=30`)
+    authFetch(`${backendUrl}/api/nudges/history?user_id=${userId}&limit=30`)
       .then(r => r.json())
       .then(data => { setNudgeHistory(Array.isArray(data) ? data : []); setHistoryLoaded(true) })
       .catch(() => { setNudgeHistory([]); setHistoryLoaded(true) })
   }, [showHistory, backendUrl, userId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function setFocus(minutes: number) {
-    await fetch(`${backendUrl}/api/auth/focus`, {
+    await authFetch(`${backendUrl}/api/auth/focus`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ user_id: userId, minutes }),
     }).catch(() => {})
-    const r = await fetch(`${backendUrl}/api/auth/focus?user_id=${userId}`).catch(() => null)
+    const r = await authFetch(`${backendUrl}/api/auth/focus?user_id=${userId}`).catch(() => null)
     if (r) setFocusStatus(await r.json())
   }
 
   async function clearFocus() {
-    await fetch(`${backendUrl}/api/auth/focus?user_id=${userId}`, { method: 'DELETE' }).catch(() => {})
+    await authFetch(`${backendUrl}/api/auth/focus?user_id=${userId}`, { method: 'DELETE' }).catch(() => {})
     setFocusStatus({ active: false, until: null })
   }
 
   async function loadTeam(teamId: string) {
     try {
       const [overviewRes, inviteRes] = await Promise.all([
-        fetch(`${backendUrl}/api/team/overview?team_id=${teamId}`),
-        fetch(`${backendUrl}/api/team/generate-invite?team_id=${teamId}`),
+        authFetch(`${backendUrl}/api/team/overview?team_id=${teamId}`),
+        authFetch(`${backendUrl}/api/team/generate-invite?team_id=${teamId}`),
       ])
       const overview = await overviewRes.json()
       const invite = await inviteRes.json()
@@ -969,7 +970,7 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
     if (!inputVal.trim()) return
     setBusy(true); setError('')
     try {
-      const res = await fetch(`${backendUrl}/api/team/create`, {
+      const res = await authFetch(`${backendUrl}/api/team/create`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: inputVal.trim(), user_id: userId }),
       })
@@ -987,7 +988,7 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
     if (!inputVal.trim()) return
     setBusy(true); setError('')
     try {
-      const res = await fetch(`${backendUrl}/api/team/join`, {
+      const res = await authFetch(`${backendUrl}/api/team/join`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ invite_code: inputVal.trim().toUpperCase(), user_id: userId }),
       })
@@ -1260,7 +1261,7 @@ function SettingsPanel({ userId, userName, backendUrl, onSignOut, onTeamJoined }
             ))}
             <button
               onClick={async () => {
-                await fetch(`${backendUrl}/api/calendar/disconnect?user_id=${userId}`, { method: 'DELETE' }).catch(() => {})
+                await authFetch(`${backendUrl}/api/calendar/disconnect?user_id=${userId}`, { method: 'DELETE' }).catch(() => {})
                 setCalendarConnected(false)
                 setCalendarEvents([])
               }}

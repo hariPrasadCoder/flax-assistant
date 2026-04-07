@@ -10,6 +10,7 @@ from pydantic import BaseModel, validator
 from typing import Optional, List
 
 from ..database import get_db
+from ..deps import get_current_user_id
 from ..models import MemoryType
 from ..ai.brain import chat as ai_chat
 from ..ai.agent import agent_greeting
@@ -44,7 +45,7 @@ _rate_limiter = _RateLimiter()
 
 class ChatRequest(BaseModel):
     message: str
-    user_id: str
+    user_id: Optional[str] = None  # ignored — user_id comes from auth token
     user_name: Optional[str] = None
     history: list[dict] = []
     nudge_context: Optional[str] = None   # nudge message that triggered this chat
@@ -62,7 +63,7 @@ class ChatRequest(BaseModel):
 
 
 @router.get("/history")
-async def get_chat_history(user_id: str, limit: int = 50, db: AsyncClient = Depends(get_db)):
+async def get_chat_history(user_id: str = Depends(get_current_user_id), limit: int = 50, db: AsyncClient = Depends(get_db)):
     """Return the last N chat messages for a user, in chronological order."""
     res = await (
         db.table("chat_messages")
@@ -85,14 +86,14 @@ async def get_chat_history(user_id: str, limit: int = 50, db: AsyncClient = Depe
 
 
 @router.post("")
-async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
-    _rate_limiter.check(req.user_id)
+async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db), user_id: str = Depends(get_current_user_id)):
+    _rate_limiter.check(user_id)
 
     # Fetch tasks for context
     tasks_res = await (
         db.table("tasks")
         .select("*")
-        .or_(f"assignee_id.eq.{req.user_id},owner_id.eq.{req.user_id}")
+        .or_(f"assignee_id.eq.{user_id},owner_id.eq.{user_id}")
         .neq("status", "done")
         .order("deadline", desc=False, nullsfirst=False)
         .limit(15)
@@ -112,14 +113,14 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
     ]
 
     # Fetch memory context
-    memories = await get_recent_memories(db, req.user_id)
-    learnings = await get_learnings(db, req.user_id)
+    memories = await get_recent_memories(db, user_id)
+    learnings = await get_learnings(db, user_id)
 
     # Recent nudges for context
     nudges_res = await (
         db.table("nudge_logs")
         .select("*")
-        .eq("user_id", req.user_id)
+        .eq("user_id", user_id)
         .order("sent_at", desc=True)
         .limit(5)
         .execute()
@@ -189,8 +190,8 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
                 "nudge_count": t.get("nudge_count", 0),
                 "is_blocked": t.get("is_blocked") or False,
                 "blocked_reason": t.get("blocked_reason"),
-                "owner_name": owner.get("name") if owner.get("id") != req.user_id else None,
-                "owner_id": t.get("owner_id") if t.get("owner_id") != req.user_id else None,
+                "owner_name": owner.get("name") if owner.get("id") != user_id else None,
+                "owner_id": t.get("owner_id") if t.get("owner_id") != user_id else None,
                 "last_nudge_message": last_nudge_msg,
             }
 
@@ -208,11 +209,11 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
             focal_task=focal_task,
         )
     except Exception as e:
-        logger.error("AI chat failed for user %s: %s", req.user_id, e, exc_info=True)
+        logger.error("AI chat failed for user %s: %s", user_id, e, exc_info=True)
         # Still save user message before returning error
         await db.table("chat_messages").insert({
             "id": str(uuid.uuid4()),
-            "user_id": req.user_id,
+            "user_id": user_id,
             "role": "user",
             "content": req.message,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -230,7 +231,7 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
 
     # Save learning if AI found one
     if ai_result.get("memory_to_save"):
-        await upsert_learning(db, req.user_id, ai_result["memory_to_save"])
+        await upsert_learning(db, user_id, ai_result["memory_to_save"])
 
     # Create tasks AI identified
     task_refs = list(ai_result.get("task_refs", []))
@@ -251,8 +252,8 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
             "title": t_data["title"],
             "description": t_data.get("description"),
             "deadline": deadline,
-            "assignee_id": req.user_id,
-            "owner_id": req.user_id,
+            "assignee_id": user_id,
+            "owner_id": user_id,
             "source": "chat",
             "is_team_visible": t_data.get("is_team_visible", True),
             "status": "open",
@@ -267,7 +268,7 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
             db=db,
             content=f"Task created from chat: '{t_data['title']}'",
             memory_type=MemoryType.task_event,
-            user_id=req.user_id,
+            user_id=user_id,
             task_id=created_task["id"],
             importance=0.7,
             ttl_hours=72,
@@ -297,7 +298,7 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
                         nudge_count = t.get("nudge_count", 0)
                         await upsert_learning(
                             db=db,
-                            user_id=req.user_id,
+                            user_id=user_id,
                             content=f"Completed '{t['title']}' in {days_taken} day(s) after {nudge_count} nudge(s)",
                             importance=0.6,
                         )
@@ -320,7 +321,7 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
                 db=db,
                 content=f"Task '{bt['title']}' marked blocked: {mb.get('reason', '')}",
                 memory_type=MemoryType.task_event,
-                user_id=req.user_id,
+                user_id=user_id,
                 task_id=bt["id"],
                 importance=0.8,
                 ttl_hours=72,
@@ -356,8 +357,8 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
         scheduler.add_job(
             send_reminder,
             trigger=DateTrigger(run_date=reminder_run),
-            args=[req.user_id, reminder_msg, task_id_for_reminder],
-            id=f"reminder_{req.user_id}_{task_id_for_reminder or 'general'}",
+            args=[user_id, reminder_msg, task_id_for_reminder],
+            id=f"reminder_{user_id}_{task_id_for_reminder or 'general'}",
             replace_existing=True,
         )
 
@@ -367,7 +368,7 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
         nt_res = await db.table("tasks").select("*").eq("id", no_data["task_id"]).limit(1).execute()
         if nt_res.data:
             nt = nt_res.data[0]
-            if nt.get("owner_id") and nt["owner_id"] != req.user_id:
+            if nt.get("owner_id") and nt["owner_id"] != user_id:
                 owner_msg = no_data.get("message", f"{req.user_name or 'Your teammate'} needs help with '{nt['title']}'")
                 owner_nudge_id = str(uuid.uuid4())
                 await db.table("nudge_logs").insert({
@@ -389,8 +390,8 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
                 "id": subtask_id,
                 "title": sub["title"],
                 "description": f"Subtask of: {sub.get('parent_task_id', '')}",
-                "assignee_id": req.user_id,
-                "owner_id": req.user_id,
+                "assignee_id": user_id,
+                "owner_id": user_id,
                 "source": "chat",
                 "is_team_visible": True,
                 "status": "open",
@@ -407,14 +408,14 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
     chat_rows = [
         {
             "id": str(uuid.uuid4()),
-            "user_id": req.user_id,
+            "user_id": user_id,
             "role": "user",
             "content": req.message,
             "created_at": now_iso,
         },
         {
             "id": str(uuid.uuid4()),
-            "user_id": req.user_id,
+            "user_id": user_id,
             "role": "assistant",
             "content": reply,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -424,8 +425,8 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
     await db.table("chat_messages").insert(chat_rows).execute()
 
     # Push mascot state update if user is connected
-    if req.user_id in ws_manager.connected_users:
-        await ws_manager.send_mascot_state(req.user_id, mascot_state)
+    if user_id in ws_manager.connected_users:
+        await ws_manager.send_mascot_state(user_id, mascot_state)
 
     return {
         "reply": reply,
@@ -436,7 +437,7 @@ async def chat(req: ChatRequest, db: AsyncClient = Depends(get_db)):
 
 
 @router.get("/greeting")
-async def get_greeting(user_id: str, user_name: str = "", db: AsyncClient = Depends(get_db)):
+async def get_greeting(user_name: str = "", user_id: str = Depends(get_current_user_id), db: AsyncClient = Depends(get_db)):
     """
     Flaxie speaks first — context-aware opening message when chat opens.
     """

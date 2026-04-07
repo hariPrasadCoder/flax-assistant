@@ -7,13 +7,14 @@ from pydantic import BaseModel, EmailStr
 from typing import Optional
 
 from ..database import get_db
+from ..deps import get_current_user_id
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
 class SetupRequest(BaseModel):
     """Called once after OTP verification to create/update the user's profile."""
-    user_id: str       # Supabase Auth user.id
+    user_id: Optional[str] = None  # ignored — user_id comes from auth token
     name: str
     email: EmailStr
     timezone: Optional[str] = "UTC"
@@ -28,7 +29,7 @@ class SetupResponse(BaseModel):
 
 
 @router.post("/setup", response_model=SetupResponse)
-async def setup_user(data: SetupRequest, db: AsyncClient = Depends(get_db)):
+async def setup_user(data: SetupRequest, db: AsyncClient = Depends(get_db), user_id: str = Depends(get_current_user_id)):
     """
     Create or update the user profile row after successful OTP verification.
     Idempotent — safe to call on every login (updating name / timezone).
@@ -37,7 +38,7 @@ async def setup_user(data: SetupRequest, db: AsyncClient = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Name cannot be empty")
 
     user_dict = {
-        "id": data.user_id,
+        "id": user_id,
         "name": data.name.strip(),
         "email": data.email,
         "timezone": data.timezone or "UTC",
@@ -61,7 +62,7 @@ async def setup_user(data: SetupRequest, db: AsyncClient = Depends(get_db)):
 
 
 @router.get("/me")
-async def get_me(user_id: str, db: AsyncClient = Depends(get_db)):
+async def get_me(user_id: str = Depends(get_current_user_id), db: AsyncClient = Depends(get_db)):
     """Look up user profile — used by desktop on startup to check if setup is needed."""
     res = await db.table("users").select("*").eq("id", user_id).limit(1).execute()
     if not res.data:
@@ -84,30 +85,27 @@ async def get_me(user_id: str, db: AsyncClient = Depends(get_db)):
 
 
 class FocusRequest(BaseModel):
-    user_id: str
+    user_id: Optional[str] = None  # ignored — user_id comes from auth token
     minutes: int
 
 
 @router.post("/focus")
-async def set_focus(data: FocusRequest, db: AsyncClient = Depends(get_db)):
+async def set_focus(data: FocusRequest, db: AsyncClient = Depends(get_db), user_id: str = Depends(get_current_user_id)):
     """Enable focus/DND mode for N minutes."""
-    res = await db.table("users").select("id").eq("id", data.user_id).limit(1).execute()
-    if not res.data:
-        raise HTTPException(status_code=404, detail="User not found")
     focus_until = (datetime.now(timezone.utc) + timedelta(minutes=data.minutes)).isoformat()
-    await db.table("users").update({"focus_until": focus_until}).eq("id", data.user_id).execute()
+    await db.table("users").update({"focus_until": focus_until}).eq("id", user_id).execute()
     return {"active": True, "until": focus_until}
 
 
 @router.delete("/focus")
-async def clear_focus(user_id: str, db: AsyncClient = Depends(get_db)):
+async def clear_focus(user_id: str = Depends(get_current_user_id), db: AsyncClient = Depends(get_db)):
     """Disable focus/DND mode."""
     await db.table("users").update({"focus_until": None}).eq("id", user_id).execute()
     return {"active": False, "until": None}
 
 
 @router.get("/focus")
-async def get_focus(user_id: str, db: AsyncClient = Depends(get_db)):
+async def get_focus(user_id: str = Depends(get_current_user_id), db: AsyncClient = Depends(get_db)):
     """Get current focus/DND status."""
     res = await db.table("users").select("focus_until").eq("id", user_id).limit(1).execute()
     if not res.data:

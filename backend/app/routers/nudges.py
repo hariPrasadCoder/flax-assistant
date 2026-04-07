@@ -5,6 +5,7 @@ from supabase import AsyncClient
 from pydantic import BaseModel
 
 from ..database import get_db
+from ..deps import get_current_user_id
 from ..models import MemoryType
 from ..ai.memory import save_memory, upsert_learning
 from ..websocket_manager import ws_manager
@@ -33,7 +34,7 @@ def infer_action_type(label: str) -> str:
 
 
 @router.get("/history")
-async def get_nudge_history(user_id: str, limit: int = 20, db: AsyncClient = Depends(get_db)):
+async def get_nudge_history(user_id: str = Depends(get_current_user_id), limit: int = 20, db: AsyncClient = Depends(get_db)):
     """Return the last N nudges for a user."""
     res = await (
         db.table("nudge_logs")
@@ -59,7 +60,7 @@ async def get_nudge_history(user_id: str, limit: int = 20, db: AsyncClient = Dep
 
 
 @router.post("/{nudge_id}/respond")
-async def respond_to_nudge(nudge_id: str, body: RespondRequest, db: AsyncClient = Depends(get_db)):
+async def respond_to_nudge(nudge_id: str, body: RespondRequest, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     res = await db.table("nudge_logs").select("*").eq("id", nudge_id).limit(1).execute()
 
     open_chat = False
@@ -224,7 +225,7 @@ async def respond_to_nudge(nudge_id: str, body: RespondRequest, db: AsyncClient 
 
 
 @router.post("/{nudge_id}/dismiss")
-async def dismiss_nudge(nudge_id: str, db: AsyncClient = Depends(get_db)):
+async def dismiss_nudge(nudge_id: str, db: AsyncClient = Depends(get_db), _user_id: str = Depends(get_current_user_id)):
     now_iso = datetime.now(timezone.utc).isoformat()
     await db.table("nudge_logs").update({
         "dismissed": True,
