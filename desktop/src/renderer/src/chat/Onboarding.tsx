@@ -118,7 +118,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
   }
 
   async function handleVerifyOtp() {
-    if (otp.length < 6 || !supabase) return
+    if (otp.length < 8 || !supabase) return
     setLoading(true)
     setError('')
 
@@ -365,7 +365,7 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
               style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
             >
               <p style={{ fontSize: 13, color: '#6b6890', marginBottom: 4 }}>
-                We'll send a 6-digit code to your email. No password required.
+                We'll send an 8-digit code to your email. No password required.
               </p>
               <input
                 style={inputStyle}
@@ -401,24 +401,24 @@ export default function Onboarding({ backendUrl, onComplete }: Props) {
               style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
             >
               <p style={{ fontSize: 13, color: '#6b6890', marginBottom: 4 }}>
-                Enter the 6-digit code from your email.
+                Enter the 8-digit code from your email.
               </p>
               <input
                 style={otpInputStyle}
-                placeholder="000000"
+                placeholder="00000000"
                 type="text"
                 inputMode="numeric"
-                maxLength={6}
+                maxLength={8}
                 value={otp}
-                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                onKeyDown={(e) => e.key === 'Enter' && otp.length >= 6 && handleVerifyOtp()}
+                onChange={(e) => setOtp(e.target.value.replace(/\D/g, '').slice(0, 8))}
+                onKeyDown={(e) => e.key === 'Enter' && otp.length === 8 && handleVerifyOtp()}
                 autoFocus
               />
               {error && <div style={{ fontSize: 12, color: '#e74c3c' }}>{error}</div>}
               <button
                 style={{ ...btnPrimary, marginTop: 4 }}
                 onClick={handleVerifyOtp}
-                disabled={loading || otp.length < 6}
+                disabled={loading || otp.length < 8}
               >
                 {loading ? 'Verifying...' : 'Verify →'}
               </button>
