@@ -39,7 +39,10 @@ const IS_MAC      = process.platform === 'darwin'
 
 function getTrayIconPath(state: 'idle' | 'alert' | 'urgent' = 'idle'): string {
   const base = state === 'urgent' ? 'trayIconUrgent' : state === 'alert' ? 'trayIconAlert' : 'trayIcon'
-  return join(__dirname, `../../resources/${base}.png`)
+  if (is.dev) {
+    return join(__dirname, `../../resources/${base}.png`)
+  }
+  return join(process.resourcesPath, 'resources', `${base}.png`)
 }
 
 function makeTrayIcon(state: 'idle' | 'alert' | 'urgent' = 'idle'): Electron.NativeImage {
